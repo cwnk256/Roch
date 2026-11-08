@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <!-- 引入 Spring Boot 默认配置（控制台 appender、颜色转换等） -->
+    <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
+    <include resource="org/springframework/boot/logging/logback/console-appender.xml"/>
+
+    <!-- 检索日志：按天 + 按大小滚动，保留 7 天，总上限 500MB -->
+    <appender name="RETRIEVAL_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>logs/retrieval.jsonl</file>
+        <encoder>
+            <pattern>%msg%n</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>logs/retrieval.%d{yyyy-MM-dd}.%i.jsonl</fileNamePattern>
+            <maxFileSize>50MB</maxFileSize>
+            <maxHistory>7</maxHistory>
+            <totalSizeCap>500MB</totalSizeCap>
+        </rollingPolicy>
+    </appender>
+
+    <!-- 异步写入：discardingThreshold=0 保证队列满时也不丢弃 INFO 日志 -->
+    <appender name="RETRIEVAL_ASYNC" class="ch.qos.logback.classic.AsyncAppender">
+        <appender-ref ref="RETRIEVAL_FILE"/>
+        <queueSize>1024</queueSize>
+        <discardingThreshold>0</discardingThreshold>
+    </appender>
+
+    <!-- rag.retrieval 独立输出到 JSONL，不重复打印到控制台 -->
+    <logger name="rag.retrieval" level="INFO" additivity="false">
+        <appender-ref ref="RETRIEVAL_ASYNC"/>
+    </logger>
+
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+    </root>
+</configuration>
