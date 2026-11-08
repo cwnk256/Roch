@@ -1,0 +1,89 @@
+HELP.md
+target/
+.mvn/wrapper/maven-wrapper.jar
+!**/src/main/**/target/
+!**/src/test/**/target/
+
+### STS ###
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+.sts4-cache
+
+### IntelliJ IDEA ###
+.idea
+*.iws
+*.iml
+*.ipr
+
+### NetBeans ###
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+/.nb-gradle/
+build/
+!**/src/main/**/build/
+!**/src/test/**/build/
+
+### VS Code ###
+.vscode/
+
+### Java 编译产物（含手工调试生成的 class） ###
+*.class
+
+### 运行日志 ###
+*.log
+logs/
+
+### 外部抓取数据（工作目录可能是仓库根或 rag 模块根） ###
+/data/
+/rag/data/
+
+### Docker 本地数据卷（Milvus / etcd / MinIO，禁止入库） ###
+volumes/
+
+### 本地调试临时文件 ###
+rag/*-arg.txt
+rag/probe-*.txt
+
+### Python（评测脚本） ###
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+### 本地构建工具（字体子集化依赖等，禁止入库） ###
+.tools/
+/scripts/
+
+### 前端（Vue + Vite）构建产物与依赖 ###
+web/node_modules/
+web/dist/
+web/.tmp-tests/
+web/tsconfig.tsbuildinfo
+
+### 环境变量与本地密钥 ###
+.env
+.env.*
+*.local
+
+### 操作系统杂项 ###
+.DS_Store
+Thumbs.db
+desktop.ini
+/plan/
+
+/.worktrees/
+!/.agents/
+!/artifacts/
+
+
+/docs/
+/.vscode/
+
+
+
