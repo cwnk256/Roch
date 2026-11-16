@@ -1,0 +1,118 @@
+{
+  "development": [
+    {
+      "kind": "COMMON",
+      "dimension": "检修断电",
+      "claimTerms": [["检修", "断电"], ["检修", "断电"]],
+      "sources": [
+        "A.pdf#page=1",
+        "B.txt#L3"
+      ],
+      "quotes": [
+        "检修 K17 设备前必须断电。",
+        "检修 K17 设备前必须断电。"
+      ],
+      "missing": [
+        "C.txt"
+      ]
+    },
+    {
+      "kind": "POSSIBLE_CONFLICT",
+      "dimension": "固定校准周期",
+      "claimTerms": [["校准", "30天"], ["校准", "60天"]],
+      "raw": ["30天", "60天"],
+      "normalized": ["30天", "60天"],
+      "missing": ["C.txt"],
+      "sources": [
+        "A.pdf#page=2",
+        "B.txt#L4"
+      ],
+      "quotes": [
+        "常规环境下，K17 设备必须按每 30 天一次的固定周期校准。",
+        "常规环境下，K17 设备必须按每 60 天一次的固定周期校准。"
+      ]
+    },
+    {
+      "kind": "EQUAL_VALUE",
+      "dimension": "年度设备预算",
+      "claimTerms": [["预算", "100万|1000000"], ["预算", "100万|1000000"]],
+      "raw": ["100万元", "1,000,000元"],
+      "normalized": ["1000000元", "1000000元"],
+      "missing": ["C.txt"],
+      "sources": [
+        "A.pdf#page=2",
+        "B.txt#L5"
+      ],
+      "quotes": [
+        "青松项目 2026 年度设备预算为 100 万元。",
+        "青松项目 2026 年度设备预算为 1,000,000 元。"
+      ]
+    },
+    {
+      "kind": "INCOMPARABLE",
+      "dimension": "年度设备预算",
+      "reasonTerms": ["期间|口径|指标|预算|支出"],
+      "claimTerms": [["预算", "100万|1000000"], ["支出", "60万|600000"]],
+      "sources": [
+        "A.pdf#page=2",
+        "B.txt#L6"
+      ],
+      "quotes": [
+        "青松项目 2026 年度设备预算为 100 万元。",
+        "青松项目 2026 年上半年设备实际支出为 60 万元。"
+      ]
+    },
+    {
+      "kind": "UNSUPPORTED_STRENGTH",
+      "claimTerms": [["每月|月度|按月", "巡检"]],
+      "probeTerms": ["每月|月度|按月", "巡检", "必须|务必|强制"],
+      "allowedStatus": ["PARTIAL", "INSUFFICIENT", "CONFLICT"],
+      "claim": "必须每月巡检 K17 设备。",
+      "sources": [
+        "A.pdf#page=2"
+      ],
+      "quotes": [
+        "建议每月巡检 K17 设备。"
+      ]
+    },
+    {
+      "kind": "MISSING",
+      "probeTerms": ["次年|明年|下一年", "节省|节约", "20万|200000"],
+      "allowedStatus": ["INSUFFICIENT"],
+      "claim": "青松项目次年将节省 20 万元。",
+      "sources": []
+    }
+  ],
+  "holdout": [
+    {
+      "kind": "POSSIBLE_CONFLICT",
+      "dimension": "固定检查周期",
+      "claimTerms": [["检查", "14天"], ["检查", "21天"]],
+      "quotes": ["设备 R06 在海边环境的固定检查周期为 14 天。", "设备 R06 在海边环境的固定检查周期为 21 天。"],
+      "raw": ["14天", "21天"],
+      "sources": [
+        "holdout/D.txt#L2",
+        "holdout/E.txt#L2"
+      ],
+      "normalized": [
+        "14天",
+        "21天"
+      ]
+    },
+    {
+      "kind": "EQUAL_VALUE",
+      "dimension": "测试预算",
+      "claimTerms": [["预算", "5万|50000"], ["预算", "5万|50000"]],
+      "quotes": ["蓝港项目 2025 年测试预算为 5 万元。", "蓝港项目 2025 年测试预算为 50,000 元。"],
+      "raw": ["5万元", "50,000元"],
+      "sources": [
+        "holdout/D.txt#L3",
+        "holdout/E.txt#L3"
+      ],
+      "normalized": [
+        "50000元",
+        "50000元"
+      ]
+    }
+  ]
+}

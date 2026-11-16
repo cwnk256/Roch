@@ -1,0 +1,68 @@
+<script setup lang="ts">
+import {computed} from 'vue'
+import {ChevronRight, ExternalLink, FileText} from 'lucide-vue-next'
+import {originalFileUrl, statusLabel, type Claim, type ReaderSource} from '../lib/report'
+
+const props = defineProps<{claim?: Claim; sources: Map<string, ReaderSource>; compact?: boolean}>()
+const citations = computed(() => (props.claim?.evidenceIds || []).map(id => ({id, source: props.sources.get(id)})))
+</script>
+
+<template>
+  <p v-if="!claim" class="notice">证据不足：未找到关联事实</p>
+  <details v-else class="claim" :data-status="claim.supportStatus || 'INSUFFICIENT'">
+    <summary>
+      <ChevronRight :size="15" class="claim-chevron" aria-hidden="true"/>
+      <span class="claim-text">{{ compact ? '查看原文与判断' : claim.text }}</span>
+      <span class="claim-status">{{ statusLabel(claim.supportStatus || 'INSUFFICIENT') }}</span>
+    </summary>
+    <div class="claim-detail">
+    <p v-if="compact" class="claim-context">{{ claim.text }}</p>
+    <p v-if="claim.reason" class="claim-reason"><span v-if="claim.automatic" class="judgment-label">自动判断</span>{{ claim.reason }}</p>
+    <p v-if="!citations.length" class="missing-source">这条陈述没有可核对的引文。</p>
+    <template v-for="{id, source} in citations" :key="id">
+      <div v-if="source" class="source">
+        <div class="source-heading"><FileText :size="15" aria-hidden="true"/><strong>{{ source.label }}</strong></div>
+        <p class="source-state">
+          {{ source.snapshot.sourceStatus ? statusLabel(source.snapshot.sourceStatus) : '来源未核验' }}
+          <template v-if="source.current"> · {{ statusLabel(source.current.chunkStatus) }}</template>
+        </p>
+        <blockquote v-if="source.snapshot.quote">{{ source.snapshot.quote }}</blockquote>
+        <p v-else-if="source.snapshot.attemptedQuote">待核引文（未匹配） · {{ source.snapshot.attemptedQuote }}</p>
+        <span v-if="source.current?.originalAvailable === false" class="missing-source">原文件当前不可用</span>
+        <a v-if="source.current?.originalAvailable" :href="originalFileUrl(source.snapshot)"
+           target="_blank" rel="noopener" class="source-link">打开原文件<ExternalLink :size="12" aria-hidden="true"/></a>
+      </div>
+      <p v-else>未找到证据快照</p>
+    </template>
+    </div>
+  </details>
+</template>
+
+<style scoped>
+.claim { margin: 8px 0; background: #fff; border: 1px solid #dfe9e3; border-radius: 8px; overflow-wrap: anywhere }
+summary { display: flex; align-items: flex-start; gap: 10px; padding: 14px; cursor: pointer; list-style: none; font-size: 13px; line-height: 1.75; color: #3d554d }
+summary::-webkit-details-marker { display: none }
+summary:hover { background: #f7fbf8; border-radius: 8px }
+summary:focus-visible { outline: 2px solid #1c7457; outline-offset: -2px; border-radius: 8px }
+.claim-chevron { flex: none; margin-top: 4px; color: #82958d; transition: transform .15s }
+[open] > summary .claim-chevron { transform: rotate(90deg) }
+.claim-text { flex: 1; min-width: 0 }
+.claim-status { flex: none; font-size: 11px; font-weight: 500; padding: 2px 8px; border-radius: 20px; background: #fff4dc; color: #996b13; white-space: nowrap }
+[data-status="SUPPORTED"] .claim-status { color: #287650; background: #e3f6eb }
+[data-status="CONFLICT"] .claim-status { color: #ad4747; background: #fde8e8 }
+.claim-detail { padding: 0 16px 16px 39px; font-size: 13px; line-height: 1.75 }
+.claim-reason { margin: 0 0 12px; color: #6c8178 }
+.claim-context { margin: 0 0 12px; color: #3d554d }
+.judgment-label { display: block; font-size: 11px; color: #82958d; margin-bottom: 3px }
+.source { margin-top: 12px; border: 1px solid #e2ebe6; padding: 14px; background: #fbfdfc; border-radius: 7px }
+.source-heading { display: flex; align-items: flex-start; gap: 7px; color: #365e4e }
+.source-heading svg { flex: none; margin-top: 4px }
+.source-heading strong { font-size: 12px; font-weight: 600 }
+.source-state { margin: 5px 0 12px; font-size: 11px; color: #71837c }
+blockquote { margin: 10px 0 12px; padding: 10px 13px; border-left: 2px solid #70bc96; background: #f1f8f4; color: #3d554d; white-space: pre-wrap }
+.source-link { display: inline-flex; gap: 5px; align-items: center; color: #1c7457; text-decoration: none; font-size: 12px }
+.source-link:hover { text-decoration: underline }
+.missing-source { color: #996b13; font-size: 12px }
+@media (max-width: 600px) { summary { flex-wrap: wrap; gap: 7px; padding: 12px } .claim-text { flex-basis: calc(100% - 25px) } .claim-status { margin-left: 22px } .claim-detail { padding: 0 12px 12px } }
+@media (prefers-reduced-motion: reduce) { .claim-chevron { transition: none } }
+</style>
