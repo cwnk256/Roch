@@ -34,6 +34,15 @@ const templateId = ref('');
 const availableTemplates = computed(() => templates.value.filter(template => template.type === type.value));
 const chosenTemplate = computed(() => availableTemplates.value.find(template => template.templateId === templateId.value));
 const sectionChoices = ref<(TemplateSection & {enabled: boolean; extraInstruction: string})[]>([]);
+const sectionOrder = ref<string[]>([]);
+const selectedSections = computed(() => {
+  const enabledSections = new Map(sectionChoices.value.filter(section => section.enabled)
+      .map(section => [section.sectionId, section]));
+  return sectionOrder.value.flatMap(sectionId => {
+    const section = enabledSections.get(sectionId);
+    return section ? [section] : [];
+  });
+});
 const exportOptions = ref(defaultExport());
 const reExportOptions = ref(defaultExport());
 const dimensions = ref('');
@@ -59,14 +68,21 @@ const canCreate = computed(() => instruction.value.trim() && !comparisonError.va
     selectedIds.value.length >= (type.value === 'COMPARE' ? 2 : 1));
 watch(availableTemplates, choices => { templateId.value = choices[0]?.templateId || '' });
 watch(chosenTemplate, template => {
+  sectionOrder.value = [];
   sectionChoices.value = (template?.sections || []).map(section => ({...section, enabled: true, extraInstruction: ''}))
 });
-function moveSection(index: number, delta: number) {
-  const choices = sectionChoices.value;
+watch(() => sectionChoices.value.filter(section => section.enabled).map(section => section.sectionId), enabledIds => {
+  const retainedIds = sectionOrder.value.filter(sectionId => enabledIds.includes(sectionId));
+  sectionOrder.value = [...retainedIds, ...enabledIds.filter(sectionId => !retainedIds.includes(sectionId))];
+});
+function moveSelectedSection(sectionId: string, delta: -1 | 1) {
+  const index = selectedSections.value.findIndex(section => section.sectionId === sectionId);
   const destination = index + delta;
-  if (destination < 0 || destination >= choices.length) return;
-  const [section] = choices.splice(index, 1);
-  choices.splice(destination, 0, section)
+  if (index < 0 || destination < 0 || destination >= selectedSections.value.length) return;
+  const orderedIds = selectedSections.value.map(section => section.sectionId);
+  const [movedId] = orderedIds.splice(index, 1);
+  orderedIds.splice(destination, 0, movedId);
+  sectionOrder.value = orderedIds;
 }
 const documentPage = ref(0);
 const documentTotal = ref(0);
@@ -119,7 +135,7 @@ async function create() {
       ...(chosenTemplate.value && {
         templateId: chosenTemplate.value.templateId,
         templateVersion: chosenTemplate.value.templateVersion,
-        sections: sectionChoices.value.filter(section => section.enabled)
+        sections: selectedSections.value
             .map(section => ({sectionId: section.sectionId, instruction: section.extraInstruction}))
       }),
       ...(type.value === 'COMPARE' && selectedDimensions.value.length && {comparisonDimensions: selectedDimensions.value}),
@@ -298,16 +314,12 @@ onUnmounted(() => { disposed = true; stopWatching() })
         </select>
       </div>
       <details v-if="chosenTemplate" class="chapters">
-        <summary>章节与顺序<span>已选 {{ sectionChoices.filter(section=>section.enabled).length }} 章</span><ChevronRight :size="14" aria-hidden="true"/></summary>
-        <div v-for="(section, index) in sectionChoices" :key="section.sectionId" class="chapter-row" :class="{'is-disabled': !section.enabled}">
+        <summary>选择章节<span>已选 {{ selectedSections.length }} 章</span><ChevronRight :size="14" aria-hidden="true"/></summary>
+        <div v-for="section in sectionChoices" :key="section.sectionId" class="chapter-row" :class="{'is-disabled': !section.enabled}">
           <div class="chapter-heading"><label class="chapter-choice">
             <input type="checkbox" v-model="section.enabled" :disabled="section.required">
             <span>{{ section.title }}</span><small v-if="section.required" class="required-label"><Check :size="11" aria-hidden="true"/>必选</small>
-          </label>
-          <div class="chapter-order"><button type="button" class="icon-button" :disabled="index === 0" :aria-label="'上移' + section.title" :title="'上移' + section.title"
-                  @click="moveSection(index, -1)"><ArrowUp :size="14"/></button>
-          <button type="button" class="icon-button" :disabled="index === sectionChoices.length - 1" :aria-label="'下移' + section.title" :title="'下移' + section.title"
-                  @click="moveSection(index, 1)"><ArrowDown :size="14"/></button></div></div>
+          </label></div>
           <div v-if="section.enabled" class="field chapter-instruction">
             <p v-if="section.instruction" class="chapter-default"><span>模板默认要求</span>{{ section.instruction }}</p>
             <label :for="'chapter-extra-' + section.sectionId">额外生成要求（可选）</label>
@@ -319,6 +331,23 @@ onUnmounted(() => { disposed = true; stopWatching() })
           </div>
         </div>
       </details>
+      <section v-if="chosenTemplate" class="chapter-sequence" aria-labelledby="chapter-sequence-title">
+        <div class="sequence-heading"><h4 id="chapter-sequence-title">章节顺序</h4><span>按此顺序生成报告</span></div>
+        <p class="sequence-hint">仅显示已选章节，使用上移、下移调整顺序。</p>
+        <ol v-if="selectedSections.length" class="sequence-list">
+          <li v-for="(section, index) in selectedSections" :key="section.sectionId" class="sequence-item">
+            <span class="sequence-position" aria-hidden="true">{{ index + 1 }}</span>
+            <span class="sequence-title">{{ section.title }}</span>
+            <div class="chapter-order">
+              <button type="button" class="button" :disabled="index === 0" :aria-label="'上移' + section.title"
+                      @click="moveSelectedSection(section.sectionId, -1)"><ArrowUp :size="14"/><span>上移</span></button>
+              <button type="button" class="button" :disabled="index === selectedSections.length - 1" :aria-label="'下移' + section.title"
+                      @click="moveSelectedSection(section.sectionId, 1)"><ArrowDown :size="14"/><span>下移</span></button>
+            </div>
+          </li>
+        </ol>
+        <p v-else class="sequence-hint">先选择章节，再调整顺序。</p>
+      </section>
       <div v-if="type === 'COMPARE'" class="field"><label for="comparison-dimensions">比较维度（用逗号分隔）</label>
         <input id="comparison-dimensions" v-model="dimensions" placeholder="如：维护周期、年度预算">
       </div>
@@ -461,6 +490,17 @@ onUnmounted(() => { disposed = true; stopWatching() })
 .chapter-order button { border: 1px solid #e2ebe6; background: #fff; padding: 5px }
 .chapter-order button + button { margin-left: 4px }
 .chapter-order button:disabled { opacity: .35; cursor: not-allowed }
+.chapter-sequence { border: 1px solid #dfe9e3; border-radius: 8px; padding: 14px; background: #fbfdfc; min-width: 0 }
+.sequence-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap }
+.sequence-heading h4 { margin: 0; color: #3d5a4e; font-size: 12px }
+.sequence-heading > span, .sequence-hint { color: #82958d; font-size: 11px }
+.sequence-hint { margin: 8px 0 12px; line-height: 1.6 }
+.sequence-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px }
+.sequence-item { display: flex; align-items: center; gap: 10px; padding: 10px; border: 1px solid #e2ebe6; border-radius: 7px; background: #fff }
+.sequence-position { display: grid; place-items: center; flex: none; width: 22px; height: 22px; border-radius: 50%; background: #f1f8f4; color: #1c7457; font-size: 11px }
+.sequence-title { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 12px; color: #3d554d }
+.sequence-item .chapter-order button { font-size: 11px; gap: 4px; padding: 6px }
+@media (max-width: 420px) { .sequence-item { flex-wrap: wrap } .sequence-item .chapter-order { margin-left: auto } }
 .chapter-instruction { margin: 9px 0 0 23px }
 .chapter-instruction textarea { width: 100%; min-width: 0; min-height: 72px; font-size: 12px; line-height: 1.6; padding: 9px 10px }
 .chapter-default { margin: 0 0 5px; font-size: 12px; line-height: 1.7; color: #668077 }
