@@ -35,6 +35,8 @@ const availableTemplates = computed(() => templates.value.filter(template => tem
 const chosenTemplate = computed(() => availableTemplates.value.find(template => template.templateId === templateId.value));
 const sectionChoices = ref<(TemplateSection & {enabled: boolean; extraInstruction: string})[]>([]);
 const sectionOrder = ref<string[]>([]);
+const movedSectionId = ref('');
+const reorderFeedback = ref('');
 const selectedSections = computed(() => {
   const enabledSections = new Map(sectionChoices.value.filter(section => section.enabled)
       .map(section => [section.sectionId, section]));
@@ -72,6 +74,8 @@ watch(chosenTemplate, template => {
   sectionChoices.value = (template?.sections || []).map(section => ({...section, enabled: true, extraInstruction: ''}))
 });
 watch(() => sectionChoices.value.filter(section => section.enabled).map(section => section.sectionId), enabledIds => {
+  movedSectionId.value = '';
+  reorderFeedback.value = '';
   const retainedIds = sectionOrder.value.filter(sectionId => enabledIds.includes(sectionId));
   sectionOrder.value = [...retainedIds, ...enabledIds.filter(sectionId => !retainedIds.includes(sectionId))];
 });
@@ -83,6 +87,8 @@ function moveSelectedSection(sectionId: string, delta: -1 | 1) {
   const [movedId] = orderedIds.splice(index, 1);
   orderedIds.splice(destination, 0, movedId);
   sectionOrder.value = orderedIds;
+  movedSectionId.value = sectionId;
+  reorderFeedback.value = `“${selectedSections.value[destination].title}”已${delta < 0 ? '上移' : '下移'}至第 ${destination + 1} 章`;
 }
 const documentPage = ref(0);
 const documentTotal = ref(0);
@@ -334,8 +340,10 @@ onUnmounted(() => { disposed = true; stopWatching() })
       <section v-if="chosenTemplate" class="chapter-sequence" aria-labelledby="chapter-sequence-title">
         <div class="sequence-heading"><h4 id="chapter-sequence-title">章节顺序</h4><span>按此顺序生成报告</span></div>
         <p class="sequence-hint">仅显示已选章节，使用上移、下移调整顺序。</p>
-        <ol v-if="selectedSections.length" class="sequence-list">
-          <li v-for="(section, index) in selectedSections" :key="section.sectionId" class="sequence-item">
+        <p class="sequence-feedback" role="status" aria-live="polite" aria-atomic="true">{{ reorderFeedback }}</p>
+        <TransitionGroup v-if="selectedSections.length" name="section-reorder" tag="ol" class="sequence-list">
+          <li v-for="(section, index) in selectedSections" :key="section.sectionId" class="sequence-item"
+              :class="{'is-moved': movedSectionId === section.sectionId}">
             <span class="sequence-position" aria-hidden="true">{{ index + 1 }}</span>
             <span class="sequence-title">{{ section.title }}</span>
             <div class="chapter-order">
@@ -345,7 +353,7 @@ onUnmounted(() => { disposed = true; stopWatching() })
                       @click="moveSelectedSection(section.sectionId, 1)"><ArrowDown :size="14"/><span>下移</span></button>
             </div>
           </li>
-        </ol>
+        </TransitionGroup>
         <p v-else class="sequence-hint">先选择章节，再调整顺序。</p>
       </section>
       <div v-if="type === 'COMPARE'" class="field"><label for="comparison-dimensions">比较维度（用逗号分隔）</label>
@@ -497,6 +505,10 @@ onUnmounted(() => { disposed = true; stopWatching() })
 .sequence-hint { margin: 8px 0 12px; line-height: 1.6 }
 .sequence-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px }
 .sequence-item { display: flex; align-items: center; gap: 10px; padding: 10px; border: 1px solid #e2ebe6; border-radius: 7px; background: #fff }
+.sequence-feedback { position: sticky; top: 0; z-index: 1; min-height: 22px; margin: 0 0 8px; padding: 3px 0; font-size: 12px; line-height: 1.6; color: #1c7457; background: #fbfdfc; overflow-wrap: anywhere }
+.sequence-item.is-moved { border-color: #6cb891; background: #e3f6eb; box-shadow: inset 3px 0 #1c7457 }
+.section-reorder-move { transition: transform .2s ease }
+@media (prefers-reduced-motion: reduce) { .section-reorder-move { transition: none } }
 .sequence-position { display: grid; place-items: center; flex: none; width: 22px; height: 22px; border-radius: 50%; background: #f1f8f4; color: #1c7457; font-size: 11px }
 .sequence-title { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 12px; color: #3d554d }
 .sequence-item .chapter-order button { font-size: 11px; gap: 4px; padding: 6px }
