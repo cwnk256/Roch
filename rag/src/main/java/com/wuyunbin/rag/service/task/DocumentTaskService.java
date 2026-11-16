@@ -13,8 +13,7 @@ import java.util.Optional;
  * 文档任务服务：负责任务生命周期（校验 → 创建 → 执行 → 导出 → 终态），
  * 实际的"检索 + 生成"编排在 {@link DocumentTaskExecutor}，文件渲染在 {@link DocumentExporter}。
  *
- * <p>Phase 2 第一版为同步执行：POST 创建后在同一请求内跑到 COMPLETED / FAILED。
- * 任务记录存内存，结果 PDF 落盘。</p>
+ * <p>创建后立即返回 PENDING 快照，由后台执行器生成文档并更新任务状态。</p>
  */
 @Slf4j
 @Service
@@ -28,27 +27,33 @@ public class DocumentTaskService {
     private final DocumentTaskRunner runner;
 
     /**
-     * 创建并同步执行一个文档任务。
+     * 创建文档任务并提交给后台执行器。
      *
      * @throws IllegalArgumentException       参数非法（400）
      * @throws IllegalStateException          指定文档不存在或未就绪（404）
-     * @throws DocumentTaskExecutionException 执行或导出失败（任务已置 FAILED，500）
      */
     public DocumentTaskResponse createAndExecute(DocumentTaskRequest request) {
         // 1. 参数校验
         validator.validateRequest(request);
+        ReportConfiguration configuration = ReportTemplates.resolve(request);
         // 2. 资料范围校验：先校验再建任务，非法引用不产生残留任务
         validator.validateDocumentsExist(request.documentIds());
 
         // 3. 创建任务（PENDING）
         DocumentTask task = DocumentTask.create(request.type(), request.documentIds(), request.instruction());
+        task.setConfiguration(configuration);
+        return enqueue(task);
+    }
+
+    private DocumentTaskResponse enqueue(DocumentTask task) {
         taskStore.save(task);
         log.info("[DocumentTask] taskId={} type={} documents={} instructionLength={} status=PENDING",
                 task.getTaskId(), task.getType(), task.getDocumentIds().size(),
                 task.getInstruction().length());
 
+        var pending = DocumentTaskResponse.from(task);
         runner.submit(task.getTaskId());
-        return DocumentTaskResponse.from(task);
+        return pending;
     }
 
     /**
@@ -66,7 +71,10 @@ public class DocumentTaskService {
         DocumentTask old = find(taskId).orElseThrow(() -> new IllegalArgumentException("任务不存在: " + taskId));
         if (old.getStatus() != com.wuyunbin.rag.dto.DocumentTaskStatus.FAILED)
             throw new IllegalStateException("仅 FAILED 任务可重试");
-        return createAndExecute(new DocumentTaskRequest(old.getType(), old.getDocumentIds(), old.getInstruction()));
+        validator.validateDocumentsExist(old.getDocumentIds());
+        DocumentTask retry = DocumentTask.create(old.getType(), old.getDocumentIds(), old.getInstruction());
+        retry.setConfiguration(old.getConfiguration());
+        return enqueue(retry);
     }
 
     public GeneratedDocument readResult(String taskId) {
@@ -81,9 +89,9 @@ public class DocumentTaskService {
         return artifactService.findPath(taskId, artifactId);
     }
 
-    public DocumentArtifactResponse reExportPdf(String taskId) {
-        DocumentTask task = find(taskId).orElseThrow(() -> new IllegalArgumentException("任务不存在: " + taskId));
+    public DocumentArtifactResponse reExportPdf(String taskId, ReportExportOptions options) {
+        find(taskId).orElseThrow(() -> new IllegalArgumentException("任务不存在: " + taskId));
         GeneratedDocument document = generatedDocumentStorage.read(taskId);
-        return runner.reExport(taskId, document);
+        return runner.reExport(taskId, document, options);
     }
 }

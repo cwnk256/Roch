@@ -1,6 +1,8 @@
 import {http} from './http'
 import type {Artifact, DocumentMeta, PageResponse, PageResult, SearchResponse, Task} from '../types'
 
+import type {Report, ReportTemplate, ExportOptions} from '../lib/report'
+
 export type Conversation = {
     conversationId: string
     title: string
@@ -99,18 +101,19 @@ export const api = {
         return http.post(`/documents${kind ? `/${kind}` : ''}`, form).then(r => r.data)
     },
     deleteDocument: (id: string) => http.delete(`/documents/${id}`).then(r => r.data),
-    reindex: (id: string, file: File) => {
+    reindex: (id: string, file?: File) => {
         const form = new FormData();
-        form.append('file', file);
+        if (file) form.append('file', file);
         return http.post(`/documents/${id}/reindex`, form).then(r => r.data)
     },
     listTasks: (params: Record<string, unknown> = {}) => http.get<PageResult<Task>>('/document-tasks', {params}).then(r => r.data),
     createTask: (payload: Record<string, unknown>) => http.post<Task>('/document-tasks', payload).then(r => r.data),
     task: (id: string) => http.get<Task>(`/document-tasks/${id}`).then(r => r.data),
-    result: (id: string) => http.get(`/document-tasks/${id}/result`).then(r => r.data),
+    templates: () => http.get<ReportTemplate[]>('/document-tasks/templates').then(r => r.data),
+    result: (id: string) => http.get<Report>(`/document-tasks/${id}/result`).then(r => r.data),
     artifacts: (id: string) => http.get<Artifact[]>(`/document-tasks/${id}/artifacts`).then(r => r.data),
     retry: (id: string) => http.post<Task>(`/document-tasks/${id}/retry`).then(r => r.data),
-    reExport: (id: string) => http.post<Artifact>(`/document-tasks/${id}/artifacts/pdf`).then(r => r.data),
+    reExport: (id: string, options?: ExportOptions) => http.post<Artifact>(`/document-tasks/${id}/artifacts/pdf`,options).then(r => r.data),
     fetchPage: (url: string, engine: string = 'auto') =>
         http.post<PageResponse>('/curl/page', {url, engine}).then(r => r.data),
 }

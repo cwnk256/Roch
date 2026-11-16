@@ -318,15 +318,28 @@ Content-Type: application/json
 
 | 方法   | 路径                                                    | 说明                                      |
 |------|-------------------------------------------------------|-----------------------------------------|
-| POST | `/api/document-tasks`                                 | 创建异步文档任务，立即返回 PENDING（SUMMARY / REPORT） |
+| POST | `/api/document-tasks`                                 | 创建异步文档任务，立即返回 PENDING（SUMMARY / REPORT / COMPARE） |
 | GET  | `/api/document-tasks`                                 | 分页查询任务历史                                |
 | GET  | `/api/document-tasks/{taskId}`                        | 查询任务状态                                  |
+| GET  | `/api/document-tasks/{taskId}/events`                 | SSE：立即返回快照并推送进度，终态后关闭 |
 | GET  | `/api/document-tasks/{taskId}/result`                 | 查询结构化 GeneratedDocument 结果              |
 | GET  | `/api/document-tasks/{taskId}/artifacts`              | 查询任务 Artifact                           |
 | GET  | `/api/document-tasks/{taskId}/artifacts/{artifactId}` | 下载指定 Artifact                           |
 | POST | `/api/document-tasks/{taskId}/retry`                  | 为 FAILED 任务创建新任务重试                      |
 | POST | `/api/document-tasks/{taskId}/artifacts/pdf`          | 从 result.json 重新导出 PDF，不调用 LLM          |
 | GET  | `/api/document-tasks/{taskId}/file`                   | 下载生成的 PDF                               |
+
+#### 分析、对比与引用核验
+
+报告页可选择分析模板或文档对比模板，调整章节顺序与分章要求。展开一条事实可查看自动支持判断、文件、页码或其他可用定位，以及生成时保存的引文。页面同时提示当前原件和切片是否可用。原文按钮打开 PDF 或下载源文件。历史 v1 报告显示章节来源。
+
+`GET /api/document-tasks/templates` 返回可用模板及版本。`POST /api/document-tasks` 接受 `SUMMARY`、`REPORT`、`COMPARE`。对比时至少选择两份不同文档，可使用 `comparisonDimensions` 指定维度。创建时可传 `templateId`、`templateVersion`、有序 `sections`、`exportOptions`。重新导出时，向既有 PDF 产物端点直接提交导出选项，例如：
+
+```json
+{"citationStyle":"FILE_LOCATION","includeToc":true,"includeEvidenceAppendix":false}
+```
+
+系统从已保存的结构化结果重导出 PDF。没有原文支撑的陈述会保留缺证标记；浏览器和 PDF 都区分来源匹配与内容支持。
 
 #### 创建任务请求示例
 
@@ -359,7 +372,9 @@ Content-Type: application/json
 ```
 
 > 任务创建后由后台线程执行，状态按 `PENDING -> RUNNING -> COMPLETED/FAILED` 更新，并持久化
-`progress/currentStep/errorCode`。结果落盘于 `data/reports/{taskId}/result.json`，PDF 与 Artifact 位于任务目录下；任务未完成时下载返回
+`progress/currentStep/errorCode`。创建、历史、详情、重试以及 SSE 的 `progress` 事件均返回这三个字段。单实例启动时，遗留的 `PENDING` 和 `RUNNING` 会保留最后进度，并标记为 `FAILED / TASK_INTERRUPTED`；重试创建新任务。
+
+结果落盘于 `data/reports/{taskId}/result.json`，PDF 与 Artifact 位于任务目录下；任务未完成时下载返回
 > 409。
 
 ### Phase 3 持久化集成测试
@@ -557,12 +572,12 @@ mvn test -f rag/pom.xml -Dtest=ChunkingBaselineTest
 - **Phase 2**：智能文档生成（已完成）— 指定 1~N 个文档 + 自然语言指令，大纲驱动的章节级 RAG → 结构化 GeneratedDocument →
   内嵌中文字体的 PDF 下载（SUMMARY / REPORT）
 - **Phase 3**：可靠文档处理（核心能力已完成）— 任务持久化、原文存储、异步执行、进度与状态、结果/Artifact
-  管理、重试、重新导出与重启恢复；待完成真实依赖端到端验收和 PDF 页码元数据
+  管理、原子领取、SSE 进度推送、重试、重新导出与重启恢复。新导出 PDF 支持章节书签。PDF 切片已携带来源页码，历史 PDF 需重建索引。
 - **Phase 4**：检索质量升级（进行中）— 检索评测基线（14 题，Hit@K/Recall@K/MRR）、切片落库 PostgreSQL
   `document_chunks`（Jieba 分词 + FTS）、KeywordRetriever、统一 RetrievalPipeline（vector/keyword/hybrid 三模式）、
   RRF 融合（k=60）；hybrid 相比纯向量 Hit@1 0.8333→0.9167、MRR 0.9028→0.9583，默认保持 vector 待扩测后评估。
   完成范围与待办见 `plan/文档处理/roch_phase4_revised_based_on_readme4_and_p3status-status.md`；
-  待完成：Reranker、Query Rewrite、Context Selection、Parent-Child、COMPARE/EXTRACT/REVIEW、前端 Task Builder/Evidence UI
+  待完成：Reranker、Query Rewrite、Context Selection、Parent-Child 以及 EXTRACT / REVIEW 任务。COMPARE 与报告配置、逐条证据查看已接入报告页。
 
 ## 贡献者
 
@@ -571,7 +586,10 @@ mvn test -f rag/pom.xml -Dtest=ChunkingBaselineTest
 ### 文档原文与可靠性接口
 
 导入的原始文件默认保存到 `data/documents/{documentId}`，可通过 `GET /api/documents/{documentId}/file` 读取。重新索引时
-`file` 参数可选；省略时使用已保存原文，历史上未保存原文的文档会返回错误并要求重新上传。
+`POST /api/documents/{documentId}/reindex` 可以直接发送空请求，也可通过 multipart 的 `file` 字段提供与原文 MD5 一致的文件。
+保存了原文的历史 PDF 重建后会补齐页码、末行正文和全文切片编号。未保存原文的历史文档需重新提供文件。
+
+Flyway V6 创建 `document_vector_cleanup`，用于记录重建时需要清理的向量。PostgreSQL 提交后清理旧向量，回滚后清理本批新向量；服务恢复后会重试未完成的清理。
 
 生成任务会在结果持久化和 PDF 导出前校验证据范围，防止引用任务未选择的文档。Phase 3 的完成范围、待办和验证记录见
 `plan/文档处理/roch_phase3_document_processing_reliability_implementation_plan-status.md`。

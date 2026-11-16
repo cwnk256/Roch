@@ -36,12 +36,22 @@ public class CleaningTextSplitter implements DocumentTransformer {
     public List<Document> apply(List<Document> documents) {
         List<Document> result = new ArrayList<>();
         for (Document document : documents) {
-            result.addAll(split(document));
+            result.addAll(splitPages(List.of(document), chunkingProperties.getPipelineVersion()));
         }
         return result;
     }
 
-    private List<Document> split(Document document) {
+    /** 一份原文的各页共享切片编号，保留各自的来源页码。 */
+    public List<Document> splitPages(List<Document> pages, String pipelineVersion) {
+        List<Document> chunks = new ArrayList<>();
+        for (Document page : pages) {
+            chunks.addAll(split(page, pipelineVersion, chunks.size()));
+        }
+        chunks.forEach(chunk -> chunk.getMetadata().put("chunk_total", chunks.size()));
+        return chunks;
+    }
+
+    private List<Document> split(Document document, String pipelineVersion, int offset) {
         String text = document.getText();
         if (text == null || text.isBlank()) {
             return List.of();
@@ -82,7 +92,6 @@ public class CleaningTextSplitter implements DocumentTransformer {
         }
 
         List<Document> result = new ArrayList<>(drafts.size());
-        String pipelineVersion = chunkingProperties.getPipelineVersion();
         String strategy = chunkingProperties.getStrategy();
         Object md5Value = document.getMetadata().get("doc_md5");
         String docMd5 = md5Value != null ? md5Value.toString() : document.getId();
@@ -93,9 +102,8 @@ public class CleaningTextSplitter implements DocumentTransformer {
             if (draft.codeLang() != null) {
                 metadata.put("code_lang", draft.codeLang());
             }
-            metadata.put("chunk_index", i);
-            metadata.put("chunk_total", drafts.size());
-            metadata.put("chunk_id", ChunkIdFactory.create(docMd5, pipelineVersion, draft.blockType(), i, draft.content()));
+            metadata.put("chunk_index", offset + i);
+            metadata.put("chunk_id", ChunkIdFactory.create(docMd5, pipelineVersion, draft.blockType(), offset + i, draft.content()));
             metadata.put("chunk_pipeline_version", pipelineVersion);
             metadata.put("chunk_strategy", strategy);
             metadata.put("section_id", draft.section().sectionId());

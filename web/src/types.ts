@@ -19,14 +19,15 @@ export interface PageResult<T> {
 
 export interface Task {
     taskId: string;
-    type: 'SUMMARY' | 'REPORT';
+    type: 'SUMMARY' | 'REPORT' | 'COMPARE';
     status: string;
     title?: string;
     resultFileName?: string;
     downloadUrl?: string;
     errorMessage?: string;
-    progress?: number;
-    currentStep?: string;
+    progress: number;
+    currentStep: string;
+    errorCode?: string | null;
     documentIds?: string[]
 }
 

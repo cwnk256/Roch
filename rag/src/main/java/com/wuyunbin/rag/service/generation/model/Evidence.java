@@ -25,8 +25,20 @@ public record Evidence(
 
         Integer pageEnd,
 
-        double score
+        double score,
+        String evidenceId,
+        String quote,
+        SourceStatus sourceStatus,
+        String pipelineVersion,
+        String textHash,
+        Integer chunkIndex,
+        String attemptedQuote
 ) {
+    public Evidence(String documentId, String fileName, String chunkId, String section, Integer pageStart,
+                    Integer pageEnd, double score) {
+        this(documentId, fileName, chunkId, section, pageStart, pageEnd, score, null, null, null, null,
+                null, null, null);
+    }
 
     /**
      * 由检索命中切片构造证据，原样保留页码（可能为 null，不伪造）。

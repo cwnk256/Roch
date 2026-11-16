@@ -6,6 +6,8 @@ import com.wuyunbin.rag.dto.RetrievalOptions;
 import com.wuyunbin.rag.dto.RetrievedChunk;
 import com.wuyunbin.rag.retrieval.MilvusChunkRetriever;
 import com.wuyunbin.rag.testutil.FakeEmbeddingModel;
+import com.wuyunbin.rag.service.DocumentService;
+import org.springframework.test.util.ReflectionTestUtils;
 import io.milvus.client.MilvusServiceClient;
 import io.milvus.param.ConnectParam;
 import io.milvus.param.collection.DropCollectionParam;
@@ -53,6 +55,7 @@ class MilvusDocumentFilterIntegrationTest {
 
         vectorStore.add(List.of(
                 chunk("doc-a", "A"),
+                chunk("doc-a", "A2"),
                 chunk("doc-b", "B"),
                 chunk("doc-c", "C")));
     }
@@ -77,6 +80,16 @@ class MilvusDocumentFilterIntegrationTest {
                         "file_name", suffix + ".txt",
                         "chunk_index", 0))
                 .build();
+    }
+
+    @Test
+    void detailCountsEveryMatchingVectorIncludingLegacyChunks() {
+        var service = new DocumentService(null, vectorStore, milvusClient,
+                null, null, null, null, null, null, null, null);
+        ReflectionTestUtils.setField(service, "databaseName", "default");
+        ReflectionTestUtils.setField(service, "collectionName", COLLECTION);
+        assertEquals(2, service.getDocument("doc-a").chunkCount());
+        assertEquals(2, service.listChunks("doc-a", null).size());
     }
 
     @Test

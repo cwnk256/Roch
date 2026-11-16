@@ -3,6 +3,7 @@ package com.wuyunbin.rag.service.task;
 import com.wuyunbin.rag.dto.DocumentMetadata;
 import com.wuyunbin.rag.dto.DocumentStatus;
 import com.wuyunbin.rag.dto.DocumentTaskRequest;
+import com.wuyunbin.rag.dto.DocumentTaskType;
 import com.wuyunbin.rag.service.DocumentService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
@@ -36,7 +37,7 @@ public class DocumentTaskValidator {
             throw new IllegalArgumentException("请求体不能为空");
         }
         if (request.type() == null) {
-            throw new IllegalArgumentException("type 不能为空（SUMMARY / REPORT）");
+            throw new IllegalArgumentException("type 不能为空（SUMMARY / REPORT / COMPARE）");
         }
         List<String> documentIds = request.documentIds();
         if (documentIds == null || documentIds.isEmpty()) {
@@ -46,6 +47,10 @@ public class DocumentTaskValidator {
             if (id == null || id.isBlank()) {
                 throw new IllegalArgumentException("documentIds 不能包含空值");
             }
+        }
+        if (request.type() == DocumentTaskType.COMPARE
+                && (documentIds.stream().distinct().count() != documentIds.size() || documentIds.size() < 2)) {
+            throw new IllegalArgumentException("文档对比需要至少两份不同的文档，且不得重复选择");
         }
         if (request.instruction() == null || request.instruction().isBlank()) {
             throw new IllegalArgumentException("instruction 不能为空");

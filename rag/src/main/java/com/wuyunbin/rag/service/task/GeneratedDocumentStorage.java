@@ -6,35 +6,71 @@ import com.wuyunbin.rag.persistence.task.DocumentResultJpaRepository;
 import com.wuyunbin.rag.persistence.task.DocumentTaskEntity;
 import com.wuyunbin.rag.persistence.task.DocumentTaskJpaRepository;
 import com.wuyunbin.rag.service.generation.model.GeneratedDocument;
-import lombok.RequiredArgsConstructor;
+import com.wuyunbin.rag.service.generation.model.CurrentSource;
+import com.wuyunbin.rag.service.generation.model.Evidence;
+import com.wuyunbin.rag.service.generation.ClaimVerifier;
+import com.wuyunbin.rag.service.storage.DocumentStorage;
+import com.wuyunbin.rag.persistence.chunk.DocumentChunkEntity;
+import com.wuyunbin.rag.persistence.chunk.DocumentChunkJpaRepository;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.*;
 
 @Service
-@RequiredArgsConstructor
 public class GeneratedDocumentStorage {
     private final ObjectMapper objectMapper;
     private final DocumentTaskProperties properties;
     private final DocumentTaskJpaRepository tasks;
     private final DocumentResultJpaRepository resultRepository;
+    private final DocumentChunkJpaRepository chunks;
+    private final DocumentStorage originals;
+
+    @Autowired
+    public GeneratedDocumentStorage(ObjectMapper objectMapper, DocumentTaskProperties properties,
+                                    DocumentTaskJpaRepository tasks, DocumentResultJpaRepository resultRepository,
+                                    DocumentChunkJpaRepository chunks, DocumentStorage originals) {
+        this.objectMapper = objectMapper;
+        this.properties = properties;
+        this.tasks = tasks;
+        this.resultRepository = resultRepository;
+        this.chunks = chunks;
+        this.originals = originals;
+    }
+
+    public GeneratedDocumentStorage(ObjectMapper objectMapper, DocumentTaskProperties properties,
+                                    DocumentTaskJpaRepository tasks, DocumentResultJpaRepository resultRepository) {
+        this(objectMapper, properties, tasks, resultRepository, null, null);
+    }
 
     public Path save(String taskId, GeneratedDocument document) {
         try {
             Path dir = Paths.get(properties.getOutputDir(), taskId);
             Files.createDirectories(dir);
             Path output = dir.resolve("result.json");
-            objectMapper.writeValue(output.toFile(), document);
             DocumentTaskEntity task = tasks.findByTaskId(taskId)
                     .orElseThrow(() -> new IllegalArgumentException("任务不存在: " + taskId));
+            Path temporary = Files.createTempFile(dir, "result-", ".tmp");
+            try {
+                objectMapper.writeValue(temporary.toFile(), document.withCurrentSources(Map.of()));
+                try {
+                    Files.move(temporary, output, java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                            java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                } catch (java.nio.file.AtomicMoveNotSupportedException ignored) {
+                    Files.move(temporary, output, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                }
+            } finally {
+                Files.deleteIfExists(temporary);
+            }
             DocumentResultEntity result = resultRepository.findByTaskTaskId(taskId)
                     .orElseGet(DocumentResultEntity::new);
             result.setTask(task);
             result.setTaskId(task.getId());
-            result.setSchemaVersion("v1");
+            result.setSchemaVersion(document.schemaVersion());
             // 存绝对路径：不同实例（IDE / mvn）工作目录不同，相对路径会导致其他实例读不到
             result.setPath(output.toAbsolutePath().toString());
             result.setCreatedAt(java.time.LocalDateTime.now());
@@ -62,7 +98,7 @@ public class GeneratedDocumentStorage {
         for (Path candidate : candidates) {
             if (Files.isReadable(candidate)) {
                 try {
-                    return objectMapper.readValue(candidate.toFile(), GeneratedDocument.class);
+                    return withCurrentSources(objectMapper.readValue(candidate.toFile(), GeneratedDocument.class));
                 } catch (IOException e) {
                     // 文件存在但内容损坏/结构不兼容：直接抛出，不再尝试其他候选
                     throw new IllegalStateException("读取结构化结果失败（文件损坏或结构不兼容）: " + candidate, e);
@@ -71,6 +107,45 @@ public class GeneratedDocumentStorage {
         }
         throw new IllegalStateException("结构化结果文件不存在: " + taskId
                 + "（尝试过: " + candidates + "）");
+    }
+
+    private GeneratedDocument withCurrentSources(GeneratedDocument document) {
+        if (document.evidenceSnapshots().isEmpty() || originals == null || chunks == null) return document;
+        Map<String, Boolean> originalAvailability = new HashMap<>();
+        Map<String, DocumentChunkEntity> currentChunks = new HashMap<>();
+        boolean lookupSucceeded = true;
+        try {
+            chunks.findAllById(document.evidenceSnapshots().stream().map(Evidence::chunkId).distinct().toList())
+                    .forEach(chunk -> currentChunks.put(chunk.getChunkId(), chunk));
+        } catch (RuntimeException ex) {
+            lookupSucceeded = false;
+        }
+        Map<String, CurrentSource> sources = new LinkedHashMap<>();
+        for (Evidence evidence : document.evidenceSnapshots()) {
+            String id = evidence.documentId();
+            if (!originalAvailability.containsKey(id)) {
+                try {
+                    originalAvailability.put(id, originals.isAvailable(id));
+                } catch (IOException | RuntimeException ex) {
+                    originalAvailability.put(id, null);
+                }
+            }
+            DocumentChunkEntity current = currentChunks.get(evidence.chunkId());
+            CurrentSource.ChunkStatus status = CurrentSource.ChunkStatus.UNKNOWN;
+            if (lookupSucceeded) {
+                if (current == null || !id.equals(current.getDocMd5())) status = CurrentSource.ChunkStatus.MISSING;
+                else if (evidence.textHash() != null && current.getContent() != null) {
+                    boolean same = evidence.textHash().equals(ClaimVerifier.hashText(current.getContent()))
+                            && Objects.equals(evidence.pipelineVersion(), current.getPipelineVersion())
+                            && Objects.equals(evidence.section(), current.getSectionPath())
+                            && Objects.equals(evidence.pageStart(), current.getPageStart())
+                            && Objects.equals(evidence.pageEnd(), current.getPageEnd());
+                    status = same ? CurrentSource.ChunkStatus.UNCHANGED : CurrentSource.ChunkStatus.CHANGED;
+                }
+            }
+            sources.put(evidence.evidenceId(), new CurrentSource(originalAvailability.get(id), status));
+        }
+        return document.withCurrentSources(sources);
     }
 
     private java.util.List<Path> candidatePaths(String taskId) {

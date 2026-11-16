@@ -1,7 +1,9 @@
 package com.wuyunbin.rag.service.task;
 
 import com.wuyunbin.rag.dto.DocumentTask;
-import com.wuyunbin.rag.dto.DocumentTaskStatus;
+import com.wuyunbin.rag.dto.ReportConfiguration;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.wuyunbin.rag.dto.PageResult;
 import com.wuyunbin.rag.persistence.task.DocumentTaskEntity;
 import com.wuyunbin.rag.persistence.task.DocumentTaskJpaRepository;
@@ -18,6 +20,7 @@ import java.util.Optional;
 @ConditionalOnProperty(name = "rag.document-task.persistence", havingValue = "jpa", matchIfMissing = true)
 public class JpaDocumentTaskStore implements DocumentTaskStore {
     private final DocumentTaskJpaRepository repository;
+    private final ObjectMapper objectMapper;
 
     @Override
     @Transactional
@@ -41,27 +44,31 @@ public class JpaDocumentTaskStore implements DocumentTaskStore {
 
     @Override
     @Transactional
+    public int claimRunning(String taskId) {
+        return repository.claimRunning(taskId);
+    }
+
+    @Override
+    @Transactional
     public PageResult<DocumentTask> list(int page, int size) {
         var result = repository.findAllByOrderByCreatedAtDesc(org.springframework.data.domain.PageRequest.of(page, size));
         return new PageResult<>(result.map(this::toDto).toList(), page, size, result.getTotalElements());
     }
 
     @Transactional
-    public void markInterruptedRunningTasksFailed() {
-        repository.findByStatus(DocumentTaskStatus.RUNNING).forEach(entity -> {
-            entity.setStatus(DocumentTaskStatus.FAILED);
-            entity.setCurrentStep("FAILED");
-            entity.setErrorCode("TASK_INTERRUPTED");
-            entity.setErrorMessage("服务重启导致任务中断，请重试。");
-            entity.setFinishedAt(java.time.LocalDateTime.now());
-            repository.save(entity);
-        });
+    public int failInterruptedTasks() {
+        return repository.failInterruptedTasks();
     }
 
     private DocumentTaskEntity toEntity(DocumentTask task, DocumentTaskEntity entity) {
         entity.setTaskId(task.getTaskId());
         entity.setType(task.getType());
         entity.setInstruction(task.getInstruction());
+        try {
+            entity.setConfigurationJson(task.getConfiguration() == null ? null : objectMapper.writeValueAsString(task.getConfiguration()));
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("任务配置无法保存", e);
+        }
         entity.setTitle(task.getTitle());
         entity.setStatus(task.getStatus());
         entity.setProgress(task.getProgress());
@@ -82,6 +89,13 @@ public class JpaDocumentTaskStore implements DocumentTaskStore {
         task.setTaskId(entity.getTaskId());
         task.setType(entity.getType());
         task.setInstruction(entity.getInstruction());
+        if (entity.getConfigurationJson() != null) {
+            try {
+                task.setConfiguration(objectMapper.readValue(entity.getConfigurationJson(), ReportConfiguration.class));
+            } catch (JsonProcessingException e) {
+                throw new IllegalStateException("任务配置无法读取：" + entity.getTaskId(), e);
+            }
+        }
         task.setTitle(entity.getTitle());
         task.setStatus(entity.getStatus());
         task.setProgress(entity.getProgress());

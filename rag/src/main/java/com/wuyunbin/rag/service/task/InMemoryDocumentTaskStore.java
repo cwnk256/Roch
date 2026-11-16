@@ -47,6 +47,17 @@ public class InMemoryDocumentTaskStore implements DocumentTaskStore {
     }
 
     @Override
+    public int claimRunning(String taskId) {
+        DocumentTask task = tasks.get(taskId);
+        if (task == null) return 0;
+        synchronized (task) {
+            if (task.getStatus() != com.wuyunbin.rag.dto.DocumentTaskStatus.PENDING) return 0;
+            task.markRunning();
+            return 1;
+        }
+    }
+
+    @Override
     public PageResult<DocumentTask> list(int page, int size) {
         List<DocumentTask> sorted = tasks.values().stream()
                 .sorted(Comparator.comparing(DocumentTask::getCreatedAt).reversed()).toList();

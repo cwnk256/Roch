@@ -19,9 +19,9 @@ public interface DocumentChunkJpaRepository extends JpaRepository<DocumentChunkE
     /**
      * 删除指定文档除当前版本外的旧版本切片（按 pipeline_version 区分）。
      */
-    @Modifying
-    @Query("DELETE FROM DocumentChunkEntity c WHERE c.docMd5 = :docMd5 AND c.pipelineVersion <> :keepVersion")
-    void deleteOldVersions(@Param("docMd5") String docMd5, @Param("keepVersion") String keepVersion);
+    /** 同一原文的导入、重新索引及删除按 PostgreSQL 事务串行执行。 */
+    @Query(value = "SELECT 1 FROM pg_advisory_xact_lock(hashtextextended(:docMd5, 0))", nativeQuery = true)
+    int lockDocument(@Param("docMd5") String docMd5);
 
     /**
      * 关键词检索：FTS 匹配 + 可选文档范围过滤，按 ts_rank 降序返回。

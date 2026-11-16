@@ -25,6 +25,12 @@ public class LocalDocumentStorage implements DocumentStorage {
         Files.writeString(dir.resolve("filename"), fileName == null ? "document" : fileName);
     }
 
+    @Override
+    public boolean isAvailable(String documentId) {
+        Path source = root.resolve(documentId).resolve("source.bin").normalize();
+        return source.startsWith(root) && Files.isRegularFile(source) && Files.isReadable(source);
+    }
+
     public Optional<StoredDocument> load(String documentId) throws IOException {
         Path dir = root.resolve(documentId).normalize();
         if (!dir.startsWith(root) || !Files.isRegularFile(dir.resolve("source.bin"))) return Optional.empty();

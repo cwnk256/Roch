@@ -2,6 +2,7 @@ package com.wuyunbin.rag.service;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonPrimitive;
 import com.wuyunbin.rag.cleaning.ChunkingProperties;
 import com.wuyunbin.rag.cleaning.CleaningTextSplitter;
 import com.wuyunbin.rag.dto.DocumentMetadata;
@@ -11,9 +12,11 @@ import com.wuyunbin.rag.persistence.chunk.DocumentChunkEntity;
 import com.wuyunbin.rag.persistence.chunk.DocumentChunkJpaRepository;
 import com.wuyunbin.rag.service.storage.DocumentStorage;
 import com.wuyunbin.rag.service.storage.DocumentStorage.StoredDocument;
-import com.wuyunbin.rag.service.storage.LocalDocumentStorage;
 import io.milvus.client.MilvusServiceClient;
 import io.milvus.grpc.MutationResult;
+import io.milvus.common.clientenum.ConsistencyLevelEnum;
+import io.milvus.orm.iterator.QueryIterator;
+import io.milvus.param.dml.QueryIteratorParam;
 import io.milvus.grpc.QueryResults;
 import io.milvus.param.R;
 import io.milvus.param.dml.DeleteParam;
@@ -26,16 +29,21 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.util.DigestUtils;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.UUID;
 
 /**
  * 文档导入服务：读取 TXT、Word、PDF、Excel 内容，按 MD5 + 策略版本查重后语义切片写入 Milvus 向量库。
@@ -46,10 +54,6 @@ import java.util.Map;
 @Slf4j
 @Service
 public class DocumentService {
-    /**
-     * Milvus query 单次最大返回数（满足文档列表与切片分页场景）。
-     */
-    private static final long QUERY_LIMIT_MAX = 16384L;
     private final CleaningTextSplitter cleaningTextSplitter;
     private final VectorStore vectorStore;
     private final MilvusServiceClient milvusClient;
@@ -60,13 +64,20 @@ public class DocumentService {
     private final DocumentStorage documentStorage;
     private final DocumentChunkJpaRepository chunkRepository;
     private final ChunkTokenizer chunkTokenizer;
+    private final VectorCleanupJournal cleanupJournal;
     @Value("${spring.ai.vectorstore.milvus.collectionName:rag_docs}")
     private String collectionName;
     @Value("${spring.ai.vectorstore.milvus.databaseName:default}")
     private String databaseName;
 
     @Autowired
-    public DocumentService(CleaningTextSplitter cleaningTextSplitter, VectorStore vectorStore, MilvusServiceClient milvusClient, ChunkingProperties chunkingProperties, WordDocumentParser wordDocumentParser, PdfDocumentParser pdfDocumentParser, ExcelDocumentParser excelDocumentParser, DocumentStorage documentStorage, DocumentChunkJpaRepository chunkRepository, ChunkTokenizer chunkTokenizer) {
+    public DocumentService(CleaningTextSplitter cleaningTextSplitter, VectorStore vectorStore,
+                           MilvusServiceClient milvusClient, ChunkingProperties chunkingProperties,
+                           WordDocumentParser wordDocumentParser, PdfDocumentParser pdfDocumentParser,
+                           ExcelDocumentParser excelDocumentParser, DocumentStorage documentStorage,
+                           DocumentChunkJpaRepository chunkRepository, ChunkTokenizer chunkTokenizer,
+                           VectorCleanupJournal cleanupJournal) {
+        this.cleanupJournal = cleanupJournal;
         this.cleaningTextSplitter = cleaningTextSplitter;
         this.vectorStore = vectorStore;
         this.milvusClient = milvusClient;
@@ -79,16 +90,12 @@ public class DocumentService {
         this.chunkTokenizer = chunkTokenizer;
     }
 
-    public DocumentService(CleaningTextSplitter cleaningTextSplitter, VectorStore vectorStore, MilvusServiceClient milvusClient, ChunkingProperties chunkingProperties, WordDocumentParser wordDocumentParser, PdfDocumentParser pdfDocumentParser, ExcelDocumentParser excelDocumentParser, DocumentChunkJpaRepository chunkRepository, ChunkTokenizer chunkTokenizer) {
-        this(cleaningTextSplitter, vectorStore, milvusClient, chunkingProperties, wordDocumentParser, pdfDocumentParser, excelDocumentParser, new LocalDocumentStorage("data/documents"), chunkRepository, chunkTokenizer);
-    }
-
     /**
      * 从文件名推导类型。
      */
     private static String fileType(String fileName) {
         if (fileName == null) return null;
-        String lower = fileName.toLowerCase();
+        String lower = fileName.toLowerCase(Locale.ROOT);
         if (lower.endsWith(".txt")) return "TXT";
         if (lower.endsWith(".docx")) return "DOCX";
         if (lower.endsWith(".pdf")) return "PDF";
@@ -151,195 +158,193 @@ public class DocumentService {
         }
     }
 
-    /**
-     * 导入 .txt 文件：按 MD5 + 策略版本决策，重复跳过，版本变化重建，新文档直接导入。
-     */
     @Transactional
     public DocumentResponse importTxt(MultipartFile file) {
         validateTxt(file);
-        byte[] bytes;
-        try {
-            bytes = file.getBytes();
-        } catch (IOException e) {
-            throw new IllegalStateException("读取文件内容失败: " + file.getOriginalFilename(), e);
-        }
-        String content = new String(bytes, StandardCharsets.UTF_8);
-        return importContent(bytes, file.getOriginalFilename(), content);
+        return importUpload(file);
     }
 
-    /**
-     * 导入 .docx Word 文件：标题样式转为 ATX Markdown 标题后走同一切片管线。
-     * MD5 按原始 .docx 字节计算，同一文件重复上传会跳过。
-     */
     @Transactional
     public DocumentResponse importWord(MultipartFile file) {
         validateWord(file);
-        byte[] bytes;
-        try {
-            bytes = file.getBytes();
-        } catch (IOException e) {
-            throw new IllegalStateException("读取文件内容失败: " + file.getOriginalFilename(), e);
-        }
-        String content;
-        try {
-            content = wordDocumentParser.parseToMarkdown(new java.io.ByteArrayInputStream(bytes));
-        } catch (IOException e) {
-            throw new IllegalStateException("Word 文档解析失败: " + file.getOriginalFilename(), e);
-        }
-        return importContent(bytes, file.getOriginalFilename(), content);
+        return importUpload(file);
     }
 
-    // ============================================================
-    // Phase 1：文档管理 API（list / detail / chunks / delete / reindex）
-    // ============================================================
-
-    /**
-     * 导入 .pdf 文件：按字号统计检测标题转为 ATX Markdown 后走同一切片管线。
-     * MD5 按原始 PDF 字节计算，同一文件重复上传会跳过。
-     */
     @Transactional
     public DocumentResponse importPdf(MultipartFile file) {
         validatePdf(file);
-        byte[] bytes;
-        try {
-            bytes = file.getBytes();
-        } catch (IOException e) {
-            throw new IllegalStateException("读取文件内容失败: " + file.getOriginalFilename(), e);
-        }
-        String content;
-        try {
-            content = pdfDocumentParser.parseToMarkdown(new java.io.ByteArrayInputStream(bytes));
-        } catch (IOException e) {
-            throw new IllegalStateException("PDF 文档解析失败: " + file.getOriginalFilename(), e);
-        }
-        return importContent(bytes, file.getOriginalFilename(), content);
+        return importUpload(file);
     }
 
-    /**
-     * 导入 Excel（.xlsx/.xls）文件：每个 Sheet 转为 Markdown 表格 + 自然语言描述后走同一切片管线。
-     * MD5 按原始 Excel 字节计算，同一文件重复上传会跳过。
-     */
     @Transactional
     public DocumentResponse importExcel(MultipartFile file) {
         validateExcel(file);
-        byte[] bytes;
+        return importUpload(file);
+    }
+
+    private StoredDocument readUpload(MultipartFile file) {
         try {
-            bytes = file.getBytes();
+            byte[] bytes = file.getBytes();
+            return new StoredDocument(DigestUtils.md5DigestAsHex(bytes), file.getOriginalFilename(), bytes);
         } catch (IOException e) {
             throw new IllegalStateException("读取文件内容失败: " + file.getOriginalFilename(), e);
         }
-        String content;
-        try {
-            content = excelDocumentParser.parseToMarkdown(new java.io.ByteArrayInputStream(bytes));
-        } catch (IOException e) {
-            throw new IllegalStateException("Excel 文档解析失败: " + file.getOriginalFilename(), e);
-        }
-        return importContent(bytes, file.getOriginalFilename(), content);
     }
 
-    /**
-     * 共享导入逻辑：MD5 查重 → 切片 → 写入 Milvus → 旧版本清理。
-     */
-    private DocumentResponse importContent(byte[] rawBytes, String fileName, String content) {
-        String md5 = DigestUtils.md5DigestAsHex(rawBytes);
-        try {
-            documentStorage.save(md5, fileName, rawBytes);
-        } catch (IOException e) {
-            throw new IllegalStateException("保存原始文档失败: " + fileName, e);
-        }
-        String version = chunkingProperties.getPipelineVersion();
+    private DocumentResponse importUpload(MultipartFile file) {
+        return indexSource(readUpload(file), false);
+    }
 
+    private DocumentResponse indexSource(StoredDocument source, boolean force) {
+        String md5 = source.documentId();
+        String fileName = source.fileName();
+        String type = fileType(fileName);
+        if (type == null) throw new IllegalArgumentException("不支持的文件类型: " + fileName);
+        String version = chunkingProperties.getPipelineVersion();
+        if (type.equals("PDF")) {
+            String pdfVersion = version + "-pdf2";
+            // 保持既有 VARCHAR(32) 约束，同时兼容较长的自定义策略版本。
+            version = pdfVersion.length() <= 32 ? pdfVersion
+                    : DigestUtils.md5DigestAsHex(pdfVersion.getBytes(StandardCharsets.UTF_8));
+        }
+
+        chunkRepository.lockDocument(md5);
         ImportDecision decision = resolveImportDecision(md5, version);
-        if (decision == ImportDecision.SKIP_CURRENT) {
-            log.warn("文件 [{}] MD5={} 策略版本 {} 已存在，跳过重复导入", fileName, md5, version);
+        if (force && decision == ImportDecision.NEW_DOCUMENT && documentStorageMissing(md5)) {
+            throw new IllegalStateException("文档不存在: " + md5);
+        }
+        if (!force && decision == ImportDecision.SKIP_CURRENT) {
+            saveSource(source);
             return new DocumentResponse(0, md5, true, "文件已存在，跳过重复导入");
         }
 
-        if (content.isBlank()) {
-            throw new IllegalArgumentException("文件内容为空: " + fileName);
-        }
-
-        Map<String, Object> metadata = new HashMap<>();
-        metadata.put("file_name", fileName);
-        metadata.put("doc_md5", md5);
-        // Phase 1：补 file_size 与 created_at 到切片元数据，供文档列表/详情展示
-        metadata.put("file_size", (long) rawBytes.length);
-        metadata.put("created_at", LocalDateTime.now().toString());
-        Document document = new Document(content, metadata);
-        List<Document> chunks = cleaningTextSplitter.apply(List.of(document));
-        vectorStore.add(chunks);
-        // Phase 4：切片同步落库 PostgreSQL，供 FTS 关键词检索
+        List<Document> chunks = prepareChunks(source, type, version);
+        if (chunks.isEmpty()) throw new IllegalArgumentException("文件没有可索引的正文: " + fileName);
+        // 修复曾经只写入其中一侧的文档。物理向量 ID 与稳定的引用 chunk_id 分开。
+        List<String> previousIds = decision == ImportDecision.NEW_DOCUMENT ? List.of() : vectorIds(md5);
+        chunkRepository.deleteByDocMd5(md5);
         persistChunks(chunks, md5, fileName, version);
+        saveSource(source);
+        replaceVectors(md5, previousIds, chunks);
+        return new DocumentResponse(chunks.size(), md5, false,
+                force || decision == ImportDecision.REBUILD_NEW_VERSION ? "已重新索引文档" : "导入成功");
+    }
 
-        String message = "导入成功";
-        if (decision == ImportDecision.REBUILD_NEW_VERSION) {
-            message = "导入成功，已按策略版本重建切片";
-            deleteOldVersions(md5, version);
+    private List<Document> prepareChunks(StoredDocument source, String type, String version) {
+        Map<String, Object> metadata = Map.of("doc_md5", source.documentId(), "file_name", source.fileName(),
+                "file_size", (long) source.content().length, "created_at", LocalDateTime.now().toString());
+        var input = new ByteArrayInputStream(source.content());
+        try {
+            if (type.equals("PDF")) {
+                List<Document> pages = new ArrayList<>();
+                for (var page : pdfDocumentParser.parsePages(input)) {
+                    Map<String, Object> pageMetadata = new HashMap<>(metadata);
+                    pageMetadata.put("page_start", page.number());
+                    pageMetadata.put("page_end", page.number());
+                    pages.add(new Document(page.content(), pageMetadata));
+                }
+                return cleaningTextSplitter.splitPages(pages, version);
+            }
+            String content = switch (type) {
+                case "TXT" -> new String(source.content(), StandardCharsets.UTF_8);
+                case "DOCX" -> wordDocumentParser.parseToMarkdown(input);
+                case "XLS", "XLSX" -> excelDocumentParser.parseToMarkdown(input);
+                default -> throw new IllegalArgumentException("不支持的文件类型: " + type);
+            };
+            if (content.isBlank()) throw new IllegalArgumentException("文件内容为空: " + source.fileName());
+            return cleaningTextSplitter.apply(List.of(new Document(content, metadata)));
+        } catch (IOException e) {
+            throw new IllegalStateException(type + " 文档解析失败: " + source.fileName(), e);
         }
+    }
 
-        log.info("导入文档 [{}] MD5={} 决策={}，清洗后切片 {} 块", fileName, md5, decision, chunks.size());
-        return new DocumentResponse(chunks.size(), md5, false, message);
+    private void saveSource(StoredDocument source) {
+        try {
+            documentStorage.save(source.documentId(), source.fileName(), source.content());
+        } catch (IOException e) {
+            throw new IllegalStateException("保存原始文档失败: " + source.fileName(), e);
+        }
+    }
+
+    List<String> vectorIds(String md5) {
+        return scanRows(documentFilter(md5), List.of("doc_id")).stream()
+                .map(row -> row.get("doc_id").toString()).toList();
+    }
+
+    private List<QueryResultsWrapper.RowRecord> scanRows(String filter, List<String> fields) {
+        var parameters = QueryIteratorParam.newBuilder()
+                .withDatabaseName(databaseName).withCollectionName(collectionName)
+                .withExpr(filter).withOutFields(fields)
+                .withConsistencyLevel(ConsistencyLevelEnum.STRONG).withBatchSize(1000L).build();
+        R<QueryIterator> response = milvusClient.queryIterator(parameters);
+        if (response.getStatus() != R.Status.Success.getCode()) {
+            throw new IllegalStateException("读取向量记录失败: " + response.getMessage());
+        }
+        QueryIterator iterator = response.getData();
+        List<QueryResultsWrapper.RowRecord> rows = new ArrayList<>();
+        try {
+            for (var batch = iterator.next(); !batch.isEmpty(); batch = iterator.next()) {
+                rows.addAll(batch);
+            }
+            return rows;
+        } finally {
+            iterator.close();
+        }
+    }
+
+    private void replaceVectors(String documentId, List<String> previousIds, List<Document> chunks) {
+        List<String> newIds = chunks.stream().map(Document::getId).toList();
+        UUID batchId = cleanupJournal.prepare(documentId, newIds, previousIds);
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                cleanupJournal.clean(batchId);
+            }
+
+            @Override
+            public void afterCompletion(int status) {
+                if (status == STATUS_ROLLED_BACK) cleanupJournal.clean(batchId);
+            }
+        });
+        vectorStore.add(chunks);
+    }
+
+    private static String documentFilter(String md5) {
+        return "metadata[\"doc_md5\"] == " + new JsonPrimitive(md5);
     }
 
     /**
      * 导入决策：MD5+版本同时命中跳过；仅 MD5 命中说明版本变化需重建；否则按新文档导入。
      */
     public ImportDecision resolveImportDecision(String md5, String version) {
-        long sameVersion = countByExpr("metadata[\"doc_md5\"] == \"" + md5
-                + "\" and metadata[\"chunk_pipeline_version\"] == \"" + version + "\"");
-        if (sameVersion > 0) {
+        String filter = documentFilter(md5);
+        if (hasChunks(filter + " and metadata[\"chunk_pipeline_version\"] == " + new JsonPrimitive(version))) {
             return ImportDecision.SKIP_CURRENT;
         }
-        long anyVersion = countByExpr("metadata[\"doc_md5\"] == \"" + md5 + "\"");
-        return anyVersion > 0 ? ImportDecision.REBUILD_NEW_VERSION : ImportDecision.NEW_DOCUMENT;
+        return hasChunks(filter) ? ImportDecision.REBUILD_NEW_VERSION : ImportDecision.NEW_DOCUMENT;
     }
 
-    /**
-     * 存在性计数查询：命中任意一条即视为存在。
-     */
-    long countByExpr(String expr) {
-        QueryParam param = QueryParam.newBuilder()
-                .withDatabaseName(databaseName)
-                .withCollectionName(collectionName)
-                .withExpr(expr)
-                .addOutField("doc_id")
-                .withLimit(1L)
-                .build();
-        R<QueryResults> response = milvusClient.query(param);
+    boolean hasChunks(String filter) {
+        var query = QueryParam.newBuilder().withDatabaseName(databaseName).withCollectionName(collectionName)
+                .withConsistencyLevel(ConsistencyLevelEnum.STRONG)
+                .withExpr(filter).addOutField("doc_id").withLimit(1L).build();
+        return executeQuery(query).getRowCount() > 0;
+    }
+
+    private int countChunks(String documentId) {
+        var query = QueryParam.newBuilder().withDatabaseName(databaseName).withCollectionName(collectionName)
+                .withConsistencyLevel(ConsistencyLevelEnum.STRONG)
+                .withExpr(documentFilter(documentId)).addOutField("count(*)").build();
+        Number count = (Number) executeQuery(query).getFieldWrapper("count(*)").getFieldData().getFirst();
+        return Math.toIntExact(count.longValue());
+    }
+
+    private QueryResultsWrapper executeQuery(QueryParam query) {
+        R<QueryResults> response = milvusClient.query(query);
         if (response.getStatus() != R.Status.Success.getCode()) {
-            throw new IllegalStateException("切片存在性查询失败: " + response.getMessage());
+            throw new IllegalStateException("Milvus 查询失败: " + response.getMessage());
         }
-        return new QueryResultsWrapper(response.getData()).getRowCount();
-    }
-
-    /**
-     * 清理同一文档旧策略版本的切片（Milvus + PostgreSQL）。
-     * 失败仅记录日志，不影响已成功写入的新版本。
-     */
-    private void deleteOldVersions(String md5, String currentVersion) {
-        String expr = "metadata[\"doc_md5\"] == \"" + md5
-                + "\" and metadata[\"chunk_pipeline_version\"] != \"" + currentVersion + "\"";
-        try {
-            R<MutationResult> response = milvusClient.delete(DeleteParam.newBuilder()
-                    .withDatabaseName(databaseName)
-                    .withCollectionName(collectionName)
-                    .withExpr(expr)
-                    .build());
-            if (response.getStatus() != R.Status.Success.getCode()) {
-                log.error("清理旧版本切片失败 md5={} currentVersion={} message={}",
-                        md5, currentVersion, response.getMessage());
-            } else {
-                log.info("已清理旧版本切片 md5={} currentVersion={}", md5, currentVersion);
-            }
-        } catch (Exception e) {
-            log.error("清理旧版本切片异常 md5={} currentVersion={}", md5, currentVersion, e);
-        }
-        // 同步清理 PostgreSQL 旧版本切片
-        try {
-            chunkRepository.deleteOldVersions(md5, currentVersion);
-        } catch (Exception e) {
-            log.error("清理 PG 旧版本切片异常 md5={} currentVersion={}", md5, currentVersion, e);
-        }
+        return new QueryResultsWrapper(response.getData());
     }
 
     /**
@@ -347,29 +352,24 @@ public class DocumentService {
      * 与 Milvus 写入对齐：chunk_id / doc_md5 / chunk_index 等元数据一致。
      */
     private void persistChunks(List<Document> chunks, String docMd5, String fileName, String version) {
-        try {
-            List<DocumentChunkEntity> entities = chunks.stream().map(chunk -> {
-                Map<String, Object> md = chunk.getMetadata();
-                DocumentChunkEntity e = new DocumentChunkEntity();
-                e.setChunkId(str(md.get("chunk_id")));
-                e.setDocMd5(docMd5);
-                e.setFileName(fileName);
-                e.setContent(chunk.getText() == null ? "" : chunk.getText());
-                e.setTokens(chunkTokenizer.tokenize(chunk.getText()));
-                e.setChunkIndex(intOrNull(md.get("chunk_index")) != null ? intOrNull(md.get("chunk_index")) : 0);
-                e.setPipelineVersion(version);
-                e.setBlockType(str(md.get("block_type")));
-                e.setSectionPath(str(md.get("section_path")));
-                e.setPageStart(intOrNull(md.get("page_start")));
-                e.setPageEnd(intOrNull(md.get("page_end")));
-                e.setCreatedAt(LocalDateTime.now());
-                return e;
-            }).toList();
-            chunkRepository.saveAll(entities);
-        } catch (Exception e) {
-            // 切片落库失败不影响 Milvus 向量检索，但关键词检索会缺失该文档
-            log.error("切片落库 PostgreSQL 失败 docMd5={} fileName={}", docMd5, fileName, e);
-        }
+        List<DocumentChunkEntity> entities = chunks.stream().map(chunk -> {
+            Map<String, Object> md = chunk.getMetadata();
+            DocumentChunkEntity entity = new DocumentChunkEntity();
+            entity.setChunkId(str(md.get("chunk_id")));
+            entity.setDocMd5(docMd5);
+            entity.setFileName(fileName);
+            entity.setContent(chunk.getText() == null ? "" : chunk.getText());
+            entity.setTokens(chunkTokenizer.tokenize(chunk.getText()));
+            entity.setChunkIndex(intOrNull(md.get("chunk_index")) != null ? intOrNull(md.get("chunk_index")) : 0);
+            entity.setPipelineVersion(version);
+            entity.setBlockType(str(md.get("block_type")));
+            entity.setSectionPath(str(md.get("section_path")));
+            entity.setPageStart(intOrNull(md.get("page_start")));
+            entity.setPageEnd(intOrNull(md.get("page_end")));
+            entity.setCreatedAt(LocalDateTime.now());
+            return entity;
+        }).toList();
+        chunkRepository.saveAllAndFlush(entities);
     }
 
     /**
@@ -377,7 +377,7 @@ public class DocumentService {
      * 支持按文件名关键词与文件类型过滤。
      */
     public List<DocumentMetadata> listDocuments(String keyword, String fileType) {
-        List<Map<String, Object>> rows = queryAllChunks();
+        List<Map<String, Object>> rows = metadataRows(scanRows("metadata[\"doc_md5\"] != \"\"", List.of("metadata")), false);
         Map<String, DocumentMetadata> byDoc = new HashMap<>();
         for (Map<String, Object> row : rows) {
             String md5 = str(row.get("doc_md5"));
@@ -402,20 +402,23 @@ public class DocumentService {
      * 文档详情：按 doc_md5 聚合得到元数据；找不到返回 null。
      */
     public DocumentMetadata getDocument(String documentId) {
-        List<Map<String, Object>> rows = queryByMd5(documentId, 1);
+        var firstChunk = QueryParam.newBuilder().withDatabaseName(databaseName).withCollectionName(collectionName)
+                .withConsistencyLevel(ConsistencyLevelEnum.STRONG)
+                .withExpr(documentFilter(documentId)).addOutField("metadata").withLimit(1L).build();
+        List<Map<String, Object>> rows = metadataRows(executeQuery(firstChunk).getRowRecords(), false);
         if (rows.isEmpty()) {
             return null;
         }
         Map<String, Object> first = rows.get(0);
         String fileName = str(first.get("file_name"));
-        long count = countByExpr("metadata[\"doc_md5\"] == \"" + documentId + "\"");
+        int count = countChunks(documentId);
         return new DocumentMetadata(
                 documentId,
                 fileName,
                 fileType(fileName),
                 documentId,
                 longOrNull(first.get("file_size")),
-                (int) count,
+                count,
                 str(first.get("chunk_pipeline_version")),
                 DocumentStatus.READY.name(),
                 parseDateTime(first.get("created_at"))
@@ -427,7 +430,7 @@ public class DocumentService {
      * 支持按 section 关键词过滤。
      */
     public List<Map<String, Object>> listChunks(String documentId, String sectionKeyword) {
-        List<Map<String, Object>> rows = queryByMd5WithContent(documentId, QUERY_LIMIT_MAX);
+        List<Map<String, Object>> rows = metadataRows(scanRows(documentFilter(documentId), List.of("metadata", "content")), true);
         List<Map<String, Object>> result = new ArrayList<>();
         for (Map<String, Object> row : rows) {
             if (sectionKeyword != null && !sectionKeyword.isBlank()) {
@@ -458,11 +461,11 @@ public class DocumentService {
             throw new IllegalArgumentException("documentId 不能为空");
         }
         // 先校验存在
-        long exist = countByExpr("metadata[\"doc_md5\"] == \"" + documentId + "\"");
-        if (exist == 0) {
+        chunkRepository.lockDocument(documentId);
+        if (!hasChunks(documentFilter(documentId))) {
             throw new IllegalStateException("文档不存在: " + documentId);
         }
-        String expr = "metadata[\"doc_md5\"] == \"" + documentId + "\"";
+        String expr = documentFilter(documentId);
         R<MutationResult> response = milvusClient.delete(DeleteParam.newBuilder()
                 .withDatabaseName(databaseName)
                 .withCollectionName(collectionName)
@@ -480,100 +483,26 @@ public class DocumentService {
         log.info("已删除文档及其全部切片 documentId={}", documentId);
     }
 
-    /**
-     * 重新索引：先删除该 doc_md5 的所有切片，再按文件类型走对应导入流程。
-     * 要求重新上传原始文件（项目未持久化原始文件）。
-     */
+    /** 用重新上传的文件或保存的原文强制重建，包括策略版本未变化的情况。 */
     @Transactional
     public DocumentResponse reindex(String documentId, MultipartFile file) {
-        if (documentId == null || documentId.isBlank()) {
-            throw new IllegalArgumentException("documentId 不能为空");
+        if (documentId == null || documentId.isBlank()) throw new IllegalArgumentException("documentId 不能为空");
+        StoredDocument source = file == null || file.isEmpty() ? loadSource(documentId) : readUpload(file);
+        if (!documentId.equals(DigestUtils.md5DigestAsHex(source.content()))) {
+            throw new IllegalArgumentException("文件 MD5 与 documentId 不一致");
         }
-        byte[] bytes;
-        String fileName;
+        return indexSource(source, true);
+    }
+
+    private boolean documentStorageMissing(String documentId) {
         try {
-            if (file != null && !file.isEmpty()) {
-                bytes = file.getBytes();
-                fileName = file.getOriginalFilename();
-            } else {
-                StoredDocument stored = documentStorage.load(documentId).orElseThrow(() -> new IllegalStateException("原始文档不存在，请重新上传文件"));
-                bytes = stored.content();
-                fileName = stored.fileName();
-            }
+            return documentStorage.load(documentId).isEmpty();
         } catch (IOException e) {
-            throw new IllegalStateException("读取原始文档失败", e);
+            throw new IllegalStateException("读取原始文档失败: " + documentId, e);
         }
-        if (fileName == null || fileName.isBlank()) throw new IllegalArgumentException("文件名为空");
-        String actualMd5 = DigestUtils.md5DigestAsHex(bytes);
-        if (!documentId.equals(actualMd5)) {
-            throw new IllegalArgumentException(
-                    "文件 MD5 与 documentId 不一致：期望=" + documentId + "，实际=" + actualMd5);
-        }
-        try {
-            documentStorage.save(documentId, fileName, bytes);
-        } catch (IOException e) {
-            throw new IllegalStateException("保存原始文档失败", e);
-        }
-        // 先删除该文档所有切片（含所有版本）
-        deleteDocument(documentId);
-        // 按扩展名走对应导入流程
-        String lower = fileName.toLowerCase();
-        if (lower.endsWith(".txt")) {
-            return importTxt(file);
-        } else if (lower.endsWith(".docx")) {
-            return importWord(file);
-        } else if (lower.endsWith(".pdf")) {
-            return importPdf(file);
-        } else if (lower.endsWith(".xlsx") || lower.endsWith(".xls")) {
-            return importExcel(file);
-        }
-        throw new IllegalArgumentException("不支持的文件类型: " + fileName);
     }
 
-    /**
-     * 查询某 doc_md5 的全部切片元数据。
-     */
-    private List<Map<String, Object>> queryByMd5(String md5, long limit) {
-        String expr = "metadata[\"doc_md5\"] == \"" + md5 + "\"";
-        return queryByExpr(expr, limit, false);
-    }
-
-    /**
-     * 查询某 doc_md5 的全部切片元数据 + content 字段（用于 chunks 接口）。
-     */
-    private List<Map<String, Object>> queryByMd5WithContent(String md5, long limit) {
-        String expr = "metadata[\"doc_md5\"] == \"" + md5 + "\"";
-        return queryByExpr(expr, limit, true);
-    }
-
-    /**
-     * 查询全库切片元数据（用于文档列表聚合）。
-     * 取一个较大 limit，避免分页；项目体量通常不超过万级切片。
-     */
-    private List<Map<String, Object>> queryAllChunks() {
-        return queryByExpr("metadata[\"doc_md5\"] != \"\"", QUERY_LIMIT_MAX, false);
-    }
-
-    /**
-     * 执行 Milvus query，返回 metadata 字段的 List<Map>；includeContent 时同时返回 content。
-     */
-    private List<Map<String, Object>> queryByExpr(String expr, long limit, boolean includeContent) {
-        QueryParam.Builder builder = QueryParam.newBuilder()
-                .withDatabaseName(databaseName)
-                .withCollectionName(collectionName)
-                .withExpr(expr)
-                .addOutField("metadata")
-                .withLimit(limit);
-        if (includeContent) {
-            builder.addOutField("content");
-        }
-        QueryParam param = builder.build();
-        R<QueryResults> response = milvusClient.query(param);
-        if (response.getStatus() != R.Status.Success.getCode()) {
-            throw new IllegalStateException("Milvus 查询失败: " + response.getMessage());
-        }
-        List<QueryResultsWrapper.RowRecord> records =
-                new QueryResultsWrapper(response.getData()).getRowRecords();
+    private List<Map<String, Object>> metadataRows(List<QueryResultsWrapper.RowRecord> records, boolean includeContent) {
         List<Map<String, Object>> result = new ArrayList<>(records.size());
         for (QueryResultsWrapper.RowRecord record : records) {
             Map<String, Object> typed = new HashMap<>();

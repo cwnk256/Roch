@@ -9,12 +9,15 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.MediaType;
+import org.springframework.http.ContentDisposition;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.util.List;
 import java.util.Map;
+import java.nio.charset.StandardCharsets;
 
 /**
  * 文档管理接口：导入（TXT/Word/PDF/Excel）+ Phase 1 文档检索（列表/详情/切片/搜索/删除/重新索引）。
@@ -163,9 +166,9 @@ public class DocumentController {
         }
     }
 
-    @PostMapping(value = "/{documentId}/reindex", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    @PostMapping("/{documentId}/reindex")
     @Operation(summary = "重新索引文档",
-            description = "按 documentId 删除旧切片后重新导入；要求重新上传与该 documentId（MD5）一致的原始文件")
+            description = "使用已保存的原文重建索引，也可上传 MD5 一致的文件")
     public ResponseEntity<?> reindex(
             @PathVariable String documentId,
             @RequestParam(value = "file", required = false) MultipartFile file) {
@@ -180,7 +183,15 @@ public class DocumentController {
     @GetMapping("/{documentId}/file")
     public ResponseEntity<?> downloadSource(@PathVariable String documentId) {
         try {
-            return ResponseEntity.ok().body(documentService.loadSource(documentId));
+            var original = documentService.loadSource(documentId);
+            String name = original.fileName().replaceAll("[\\p{Cntrl}/\\\\]", "_");
+            boolean pdf = name.toLowerCase(java.util.Locale.ROOT).endsWith(".pdf");
+            var disposition = pdf ? ContentDisposition.inline() : ContentDisposition.attachment();
+            return ResponseEntity.ok()
+                    .header(HttpHeaders.CONTENT_DISPOSITION, disposition.filename(name, StandardCharsets.UTF_8).build().toString())
+                    .header("X-Content-Type-Options", "nosniff")
+                    .contentType(pdf ? MediaType.APPLICATION_PDF : MediaType.APPLICATION_OCTET_STREAM)
+                    .contentLength(original.content().length).body(original.content());
         } catch (IllegalStateException e) {
             return ResponseEntity.status(404).body(Map.of("error", e.getMessage()));
         }

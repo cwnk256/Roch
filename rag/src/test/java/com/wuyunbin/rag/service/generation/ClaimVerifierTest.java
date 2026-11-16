@@ -1,0 +1,109 @@
+package com.wuyunbin.rag.service.generation;
+
+import com.wuyunbin.rag.dto.RetrievedChunk;
+import com.wuyunbin.rag.persistence.chunk.DocumentChunkEntity;
+import com.wuyunbin.rag.persistence.chunk.DocumentChunkJpaRepository;
+import com.wuyunbin.rag.service.generation.model.SourceStatus;
+import com.wuyunbin.rag.service.generation.model.SupportStatus;
+import org.junit.jupiter.api.Test;
+import java.util.List;
+import java.util.Optional;
+import java.util.Set;
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
+
+class ClaimVerifierTest {
+    @Test void retrievesOriginalSpellingAndRejectsAmbiguousCaseFoldedIdentifiers() throws Exception {
+        var storage = mock(com.wuyunbin.rag.service.storage.DocumentStorage.class);
+        var parsed = new OriginalPassages(storage, null, null, null);
+        var actual = "设备 K17 的频率为 50 Hz。标记 mW。标记 MW。";
+        var bytes = actual.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        var id = org.springframework.util.DigestUtils.md5DigestAsHex(bytes);
+        when(storage.load(id)).thenReturn(Optional.of(new com.wuyunbin.rag.service.storage.DocumentStorage.StoredDocument(
+                id, "source.txt", bytes)));
+        parsed.beginTask();
+        try {
+            assertEquals("K17", parsed.find(id, null, java.util.regex.Pattern.compile("k17", java.util.regex.Pattern.CASE_INSENSITIVE)).quote());
+            assertNull(parsed.find(id, null, java.util.regex.Pattern.compile("标记 mw", java.util.regex.Pattern.CASE_INSENSITIVE)).quote());
+            org.mockito.Mockito.verify(storage, times(1)).load(id);
+        } finally {
+            parsed.endTask();
+        }
+    }
+    final DocumentChunkJpaRepository chunks = mock(DocumentChunkJpaRepository.class);
+    final ClaimSupportJudge judge = mock(ClaimSupportJudge.class);
+    final ClaimVerifier verifier = new ClaimVerifier(chunks, judge);
+    final String original = "巡检周期 30\r\n 天。建议每月巡检。";
+    final RetrievedChunk hit = new RetrievedChunk("c", "d", "index.pdf", original, null, null, null, 0, 0.99);
+
+    DocumentChunkEntity persisted(String documentId) {
+        var row = new DocumentChunkEntity();
+        row.setDocMd5(documentId);
+        row.setChunkId("c");
+        row.setFileName("原文.pdf");
+        row.setPipelineVersion("v3");
+        row.setPageStart(5);
+        row.setContent(original);
+        return row;
+    }
+
+    ClaimVerifier.VerifiedClaim verify(int source, String quote) {
+        return verifier.verify("C1", "必须每月巡检。", List.of(new ClaimVerifier.Citation(source, quote)),
+                List.of(hit), Set.of("d"));
+    }
+
+    @Test void matchesWhitespaceButSnapshotsOriginalAndChecksSemanticsIndependently() {
+        when(chunks.findById("c")).thenReturn(Optional.of(persisted("d")));
+        when(judge.judge(anyString(), anyList())).thenReturn(
+                new ClaimSupportJudge.Judgment(SupportStatus.PARTIAL, "原文只有建议。"));
+        var verified = verify(1, "巡检周期 30 天。建议每月巡检。");
+        var evidence = verified.evidences().getFirst();
+        assertEquals(original, evidence.quote());
+        assertEquals(SourceStatus.MATCHED, evidence.sourceStatus());
+        assertEquals("原文.pdf", evidence.fileName());
+        assertEquals(5, evidence.pageStart());
+        assertEquals(64, evidence.textHash().length());
+        assertEquals(SupportStatus.PARTIAL, verified.claim().supportStatus());
+    }
+
+    @Test void changedNumberAndOutOfContextQuoteCannotGainSupport() {
+        when(chunks.findById("c")).thenReturn(Optional.of(persisted("d")));
+        var tampered = verify(1, "巡检周期 60 天。");
+        assertEquals(SourceStatus.QUOTE_MISMATCH, tampered.evidences().getFirst().sourceStatus());
+        assertNull(tampered.evidences().getFirst().quote());
+        assertEquals(SupportStatus.INSUFFICIENT, tampered.claim().supportStatus());
+        var shortHit = new RetrievedChunk("c","d","index.pdf","建议每月巡检。",null,null,null,0,0.9);
+        var unseen = verifier.verify("C1","巡检周期",List.of(new ClaimVerifier.Citation(1, "巡检周期")),
+                List.of(shortHit),Set.of("d"));
+        assertEquals(SourceStatus.QUOTE_MISMATCH, unseen.evidences().getFirst().sourceStatus());
+        verifyNoInteractions(judge);
+    }
+
+    @Test void absentCrossDocumentAndInventedReferencesFailClosed() {
+        when(chunks.findById("c")).thenReturn(Optional.of(persisted("other")), Optional.empty());
+        for (int i=0; i<2; i++) {
+            var evidence = verify(1, "建议每月巡检。").evidences().getFirst();
+            assertEquals(SourceStatus.SOURCE_UNAVAILABLE, evidence.sourceStatus());
+            assertNull(evidence.quote());
+        }
+        assertTrue(verify(99, original).claim().evidenceIds().isEmpty());
+        assertTrue(verifier.verify("id","未选文档",List.of(new ClaimVerifier.Citation(1,original)),
+                List.of(hit),Set.of("other")).claim().evidenceIds().isEmpty());
+        verifyNoInteractions(judge);
+    }
+
+    @Test void modelFailurePreservesLocatedQuoteAndInsufficientJudgment() {
+        when(chunks.findById("c")).thenReturn(Optional.of(persisted("d")));
+        when(judge.judge(anyString(), anyList())).thenThrow(new IllegalStateException("timeout"));
+        var verified = verify(1, "建议每月巡检。");
+        assertEquals(SourceStatus.MATCHED, verified.evidences().getFirst().sourceStatus());
+        assertEquals(SupportStatus.INSUFFICIENT, verified.claim().supportStatus());
+        assertTrue(verified.claim().reason().contains("判断未完成"));
+    }
+
+    @Test void rejectsQuoteCuttingOffLeadingDigit() {
+        when(chunks.findById("c")).thenReturn(Optional.of(persisted("d")));
+        assertEquals(SourceStatus.QUOTE_MISMATCH, verify(1, "0 天。").evidences().getFirst().sourceStatus());
+        verifyNoInteractions(judge);
+    }
+}

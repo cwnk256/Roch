@@ -4,6 +4,7 @@ import com.wuyunbin.rag.dto.*;
 import com.wuyunbin.rag.retrieval.ChunkRetriever;
 import com.wuyunbin.rag.retrieval.DocumentRetriever;
 import com.wuyunbin.rag.service.DocumentService;
+import com.wuyunbin.rag.service.comparison.ComparisonGenerator;
 import com.wuyunbin.rag.service.generation.DocumentSummaryGenerator;
 import com.wuyunbin.rag.service.generation.GeneratedDocumentAssembler;
 import com.wuyunbin.rag.service.generation.OutlineGenerator;
@@ -55,7 +56,7 @@ class DocumentTaskExecutorTest {
 
         executor = new DocumentTaskExecutor(
                 documentRetriever, chunkRetriever, outlineGenerator,
-                sectionGenerator, summaryGenerator, assembler, documentService);
+                sectionGenerator, summaryGenerator, assembler, documentService, mock(ComparisonGenerator.class));
         ReflectionTestUtils.setField(executor, "defaultTopK", 8);
         ReflectionTestUtils.setField(executor, "defaultThreshold", 0.5);
     }
@@ -107,15 +108,15 @@ class DocumentTaskExecutorTest {
         });
 
         // 章节正文与证据均来自实际传入的检索切片
-        when(sectionGenerator.generate(eq(DocumentTaskType.REPORT), any(), anyList()))
+        when(sectionGenerator.generate(eq(DocumentTaskType.REPORT), any(), anyList(), eq(SELECTED)))
                 .thenAnswer(invocation -> {
                     ReportSectionPlan plan = invocation.getArgument(1);
                     List<RetrievedChunk> chunks = invocation.getArgument(2);
                     List<Evidence> evidences = chunks.stream().map(Evidence::from).toList();
                     return new GeneratedSection(plan.title(), "正文-" + plan.title(), evidences);
                 });
-        when(summaryGenerator.generate(anyString(), anyString(), anyList()))
-                .thenReturn("这是整体摘要。");
+        when(summaryGenerator.generateSummary(anyString(), anyString(), anyList()))
+                .thenReturn(new VerifiedSummary("这是整体摘要。", List.of(), List.of()));
 
         GeneratedDocument result = executor.execute(task);
 
@@ -185,7 +186,7 @@ class DocumentTaskExecutorTest {
                 .thenReturn(new ReportPlan("标题",
                         List.of(new ReportSectionPlan("第一章", "目的"))));
         when(chunkRetriever.search(anyString(), any())).thenReturn(List.of());
-        when(sectionGenerator.generate(any(), any(), anyList()))
+        when(sectionGenerator.generate(any(), any(), anyList(), eq(SELECTED)))
                 .thenThrow(new RuntimeException("LLM 服务不可用"));
 
         // 章节失败必须向上抛出（由 Service 转为整个任务 FAILED，不静默跳过）

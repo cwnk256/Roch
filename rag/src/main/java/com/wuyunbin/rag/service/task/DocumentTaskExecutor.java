@@ -4,6 +4,7 @@ import com.wuyunbin.rag.dto.*;
 import com.wuyunbin.rag.retrieval.ChunkRetriever;
 import com.wuyunbin.rag.retrieval.DocumentRetriever;
 import com.wuyunbin.rag.service.DocumentService;
+import com.wuyunbin.rag.service.comparison.ComparisonGenerator;
 import com.wuyunbin.rag.service.generation.DocumentSummaryGenerator;
 import com.wuyunbin.rag.service.generation.GeneratedDocumentAssembler;
 import com.wuyunbin.rag.service.generation.OutlineGenerator;
@@ -47,6 +48,7 @@ public class DocumentTaskExecutor {
     private final DocumentSummaryGenerator summaryGenerator;
     private final GeneratedDocumentAssembler assembler;
     private final DocumentService documentService;
+    private final ComparisonGenerator comparisonGenerator;
 
     /**
      * 复用既有 RAG 检索配置，不新增 task 专属检索参数。
@@ -62,28 +64,32 @@ public class DocumentTaskExecutor {
      * 任一章节生成失败将抛出异常，由 Service 转为任务 FAILED（不静默跳过章节）。
      */
     public GeneratedDocument execute(DocumentTask task) {
+        if (task.getType() == DocumentTaskType.COMPARE) {
+            return comparisonGenerator.generate(task, defaultTopK, defaultThreshold);
+        }
         Set<String> documentIds = new LinkedHashSet<>(task.getDocumentIds());
         RetrievalOptions options = new RetrievalOptions(defaultTopK, defaultThreshold, documentIds);
 
-        // 1. 文档级检索（始终限定在任务指定文档内）
-        List<RetrievedDocument> hitDocuments = documentRetriever.search(task.getInstruction(), options);
-        List<RetrievedDocument> outlineDocuments = ensureAllSelectedDocuments(documentIds, hitDocuments);
-
-        // 2. 生成大纲（结构化输出）
-        ReportPlan plan = outlineGenerator.generate(task.getInstruction(), task.getType(), outlineDocuments);
-
+        ReportConfiguration configuration = task.getConfiguration();
+        ReportPlan plan;
+        if (configuration != null && configuration.templateId() != null) {
+            plan = configuration.toPlan();
+        } else {
+            List<RetrievedDocument> hits = documentRetriever.search(task.getInstruction(), options);
+            plan = outlineGenerator.generate(task.getInstruction(), task.getType(), ensureAllSelectedDocuments(documentIds, hits));
+        }
         // 3. 逐章节：章节级 Chunk 检索 + LLM 生成（章节失败直接抛出，整任务 FAILED）
         List<GeneratedSection> sections = new ArrayList<>();
         for (ReportSectionPlan sectionPlan : plan.sections()) {
             String sectionQuery = buildSectionQuery(sectionPlan);
             List<RetrievedChunk> chunks = chunkRetriever.search(sectionQuery, options);
-            GeneratedSection section = sectionGenerator.generate(task.getType(), sectionPlan, chunks);
+            GeneratedSection section = sectionGenerator.generate(task.getType(), sectionPlan, chunks, documentIds);
             sections.add(section);
         }
 
         // 4. 整体摘要 + 组装（章节保序、Evidence 去重）
-        String summary = summaryGenerator.generate(plan.title(), task.getInstruction(), sections);
-        GeneratedDocument document = assembler.assemble(plan.title(), summary, sections);
+        var summary = summaryGenerator.generateSummary(plan.title(), task.getInstruction(), sections);
+        GeneratedDocument document = assembler.assemble(plan.title(), summary, sections).withConfiguration(configuration);
 
         log.info("[DocumentTask] taskId={} 文档生成完成 title={} sections={} references={}",
                 task.getTaskId(), document.title(), document.sections().size(), document.references().size());

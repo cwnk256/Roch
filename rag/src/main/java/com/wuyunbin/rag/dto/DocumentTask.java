@@ -37,6 +37,8 @@ public class DocumentTask {
      */
     private String instruction;
 
+    private ReportConfiguration configuration;
+
     /**
      * 任务状态。
      */

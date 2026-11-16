@@ -2,6 +2,7 @@ package com.wuyunbin.rag.service;
 
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.pdmodel.PDDocument;
+import org.apache.pdfbox.pdmodel.PDPage;
 import org.apache.pdfbox.text.PDFTextStripper;
 import org.apache.pdfbox.text.TextPosition;
 import org.springframework.stereotype.Component;
@@ -10,6 +11,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -51,24 +53,25 @@ public class PdfDocumentParser {
      * @throws IOException 文件读取或解析失败
      */
     public String parseToMarkdown(InputStream inputStream) throws IOException {
-        byte[] bytes = inputStream.readAllBytes();
-        try (PDDocument document = Loader.loadPDF(bytes)) {
-            // Step 1: 收集行文本 + 字号
-            List<LineInfo> lines = new ArrayList<>();
-            LineCollectingStripper collector = new LineCollectingStripper(lines);
+        return String.join("\n\n", parsePages(inputStream).stream().map(PdfPage::content).toList());
+    }
+
+    public record PdfPage(int number, String content) {}
+
+    public List<PdfPage> parsePages(InputStream inputStream) throws IOException {
+        try (PDDocument document = Loader.loadPDF(inputStream.readAllBytes())) {
+            Map<Integer, List<LineInfo>> pages = new LinkedHashMap<>();
+            LineCollectingStripper collector = new LineCollectingStripper(pages);
             collector.setSortByPosition(true);
             collector.setAddMoreFormatting(true);
             collector.getText(document);
-
-            if (lines.isEmpty()) {
-                throw new IOException("PDF 文档正文内容为空");
-            }
-
-            // Step 2: 确定正文字号（频率最高的字号）
-            float bodySize = determineBodyFontSize(lines);
-
-            // Step 3: 生成 Markdown
-            return buildMarkdown(lines, bodySize);
+            float bodySize = determineBodyFontSize(pages.values().stream().flatMap(List::stream).toList());
+            List<PdfPage> result = pages.entrySet().stream()
+                    .map(page -> new PdfPage(page.getKey(), buildMarkdown(page.getValue(), bodySize)))
+                    .filter(page -> !page.content().isBlank())
+                    .toList();
+            if (result.isEmpty()) throw new IOException("PDF 文档正文内容为空");
+            return result;
         }
     }
 
@@ -92,20 +95,9 @@ public class PdfDocumentParser {
     private String buildMarkdown(List<LineInfo> lines, float bodySize) {
         StringBuilder sb = new StringBuilder();
         boolean inParagraph = false;
-        int currentPage = 0;
 
         for (LineInfo line : lines) {
             String text = line.text.strip();
-
-            // 页码标记行
-            if (text.startsWith("--- Page ") && text.endsWith(" ---")) {
-                if (inParagraph) {
-                    sb.append("\n\n");
-                    inParagraph = false;
-                }
-                currentPage++;
-                continue;
-            }
 
             if (text.isEmpty()) {
                 if (inParagraph) {
@@ -132,15 +124,7 @@ public class PdfDocumentParser {
             }
         }
 
-        String result = sb.toString().strip();
-        if (result.isEmpty()) {
-            result = lines.stream()
-                    .map(l -> l.text.strip())
-                    .filter(t -> !t.isEmpty() && !t.startsWith("--- Page"))
-                    .reduce((a, b) -> a + "\n" + b)
-                    .orElse("");
-        }
-        return result;
+        return sb.toString().strip();
     }
 
     private int detectHeadingLevel(LineInfo line, String text, float bodySize) {
@@ -185,12 +169,26 @@ public class PdfDocumentParser {
      * PDFBox 按行调用 writeString（每行可能多次调用），在 writeLineSeparator 时结算。
      */
     static class LineCollectingStripper extends PDFTextStripper {
-        private final List<LineInfo> lines;
+        private final Map<Integer, List<LineInfo>> pages;
+        private List<LineInfo> lines;
         private final StringBuilder currentLine = new StringBuilder();
         private float currentMaxFontSize = 0;
 
-        LineCollectingStripper(List<LineInfo> lines) throws IOException {
-            this.lines = lines;
+        LineCollectingStripper(Map<Integer, List<LineInfo>> pages) throws IOException {
+            this.pages = pages;
+        }
+
+        @Override
+        protected void startPage(PDPage page) throws IOException {
+            super.startPage(page);
+            lines = new ArrayList<>();
+            pages.put(getCurrentPageNo(), lines);
+        }
+
+        @Override
+        protected void endPage(PDPage page) throws IOException {
+            flushLine();
+            super.endPage(page);
         }
 
         @Override
@@ -212,6 +210,11 @@ public class PdfDocumentParser {
 
         @Override
         protected void writeLineSeparator() {
+            flushLine();
+        }
+
+        private void flushLine() {
+            if (currentLine.isEmpty()) return;
             lines.add(new LineInfo(currentLine.toString(), currentMaxFontSize));
             currentLine.setLength(0);
             currentMaxFontSize = 0;
@@ -219,6 +222,7 @@ public class PdfDocumentParser {
 
         @Override
         protected void writeParagraphSeparator() {
+            flushLine();
             lines.add(new LineInfo("", 0));
         }
     }

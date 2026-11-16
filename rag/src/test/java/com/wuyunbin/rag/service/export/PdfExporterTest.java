@@ -1,11 +1,20 @@
 package com.wuyunbin.rag.service.export;
 
+import com.wuyunbin.rag.service.generation.model.Claim;
+import com.wuyunbin.rag.service.generation.model.SourceStatus;
+import com.wuyunbin.rag.service.generation.model.SupportStatus;
+import com.wuyunbin.rag.dto.ReportExportOptions;
+import com.wuyunbin.rag.dto.ReportConfiguration;
+import com.wuyunbin.rag.service.comparison.ComparisonResult;
 import com.wuyunbin.rag.service.generation.model.Evidence;
 import com.wuyunbin.rag.service.generation.model.GeneratedDocument;
 import com.wuyunbin.rag.service.generation.model.GeneratedSection;
 import com.wuyunbin.rag.service.task.DocumentTaskProperties;
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.pdmodel.PDDocument;
+import org.apache.pdfbox.pdmodel.interactive.documentnavigation.outline.PDDocumentOutline;
+import org.apache.pdfbox.pdmodel.interactive.documentnavigation.outline.PDOutlineItem;
+import org.apache.pdfbox.pdmodel.interactive.documentnavigation.destination.PDPageDestination;
 import org.apache.pdfbox.text.PDFTextStripper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -108,6 +117,98 @@ class PdfExporterTest {
     }
 
     @Test
+    void reExportUsesSameSnapshotsWithEitherCitationStyle() throws Exception {
+        Evidence source = new Evidence("docA", "设备维护手册.pdf", "chunk-1", null, 7, 7, .8,
+                "ev-12", "原文校准周期为30天。", SourceStatus.MATCHED, "parser-1", "sha256", 0, null);
+        Claim claim = new Claim("cl-1", "校准周期为30天。", List.of("ev-12"), SupportStatus.SUPPORTED, "引文明确", true);
+        Claim gap = Claim.unsupported("cl-2", "预计成本降低。", "未提供预测依据");
+        Evidence mismatch = new Evidence("docA", "设备维护手册.pdf", "chunk-2", null, null, null, .4,
+                "ev-13", null, SourceStatus.QUOTE_MISMATCH, "parser-1", "sha256", 1, "虚构引文");
+        Evidence unavailable = new Evidence("docA", "设备维护手册.pdf", "missing", null, null, null, .3,
+                "ev-14", null, SourceStatus.SOURCE_UNAVAILABLE, null, null, null, null);
+        Claim failed = new Claim("cl-3", "需复核的陈述。", List.of("ev-13", "ev-14"),
+                SupportStatus.INSUFFICIENT, "引文或来源未匹配", true);
+        var evidence = List.of(source, mismatch, unavailable);
+        GeneratedSection section = new GeneratedSection("结论", "", evidence, List.of(claim, gap, failed));
+        GeneratedDocument doc = new GeneratedDocument("核验报告", claim.text(), List.of(section), List.of(source),
+                "v2", List.of("cl-1"), List.of(), evidence, null, null, java.util.Map.of());
+        String numbered = pdfText(exporter.export(doc, "numbered", null));
+        String numberedWithoutAppendix = pdfText(exporter.export(doc, "numbered-no-appendix", new ReportExportOptions(
+                ReportExportOptions.CitationStyle.NUMBERED, false, false)));
+        String named = pdfText(exporter.export(doc, "named", new ReportExportOptions(
+                ReportExportOptions.CitationStyle.FILE_LOCATION, false, false)));
+        for (String required : List.of("校准周期为30天。", "原文已匹配", "支持", "预计成本降低。", "证据不足", "未提供预测依据", "引文不匹配", "来源不可用")) {
+            assertContains(numbered, required);
+            assertContains(named, required);
+        }
+        assertContains(numbered, "[1]");
+        assertContains(numberedWithoutAppendix, "[1] 设备维护手册.pdf · 第 7 页");
+        assertFalse(numberedWithoutAppendix.contains("证据附录"));
+        assertContains(numbered, "原文校准周期为30天。");
+        assertContains(numbered, "目录");
+        assertContains(named, "[设备维护手册.pdf · 第 7 页]");
+        assertFalse(named.contains("目录"));
+        assertFalse(named.contains("证据附录"));
+        assertFalse(named.contains("原文校准周期为30天。"));
+    }
+
+    @Test
+    void comparisonExportPreservesSelectedOrderBothSourcesAndMissingCells() throws Exception {
+        Evidence first = new Evidence("a", "A.pdf", "ca", "附件", 1, 1, .9, "ea",
+                "周期为30天", SourceStatus.MATCHED, "1", "ha", 0, null);
+        Evidence target = new Evidence("a", "A.pdf", "ca", "附件", 1, 1, .9, "et",
+                "目标为60天", SourceStatus.MATCHED, "1", "ha", 0, null);
+        Evidence second = new Evidence("b", "B.pdf", "cb", null, 4, 4, .8, "eb",
+                "周期为60天", SourceStatus.MATCHED, "1", "hb", 0, null);
+        List<Claim> claims = List.of(new Claim("A", first.quote(), List.of("ea"), SupportStatus.SUPPORTED, "明确", true),
+                new Claim("B", second.quote(), List.of("eb"), SupportStatus.SUPPORTED, "明确", true),
+                new Claim("T", target.quote(), List.of("et"), SupportStatus.SUPPORTED, "明确", true));
+        var fixed = new ComparisonResult.Fact("A", null, null, null, "周期", "30", "天",
+                "720", "小时", true, true, false, "固定", first.quote());
+        var unverified = new ComparisonResult.Fact("T", null, null, null, "周期", "60", "天",
+                null, null, false, false, false, null, target.quote());
+        var conflict = new ComparisonResult.Conclusion(ComparisonResult.Kind.POSSIBLE_CONFLICT, "周期",
+                "两份规范的固定周期不同。", List.of("A", "B"));
+        var compare = new ComparisonResult(List.of(new ComparisonResult.Source("a", "A.pdf"),
+                new ComparisonResult.Source("b", "B.pdf")), List.of(new ComparisonResult.Row("费用",
+                List.of(new ComparisonResult.Cell("a", ComparisonResult.Status.NOT_FOUND, "本次未找到依据", List.of()),
+                        new ComparisonResult.Cell("b", ComparisonResult.Status.RETRIEVAL_FAILED, "检索失败", List.of()))),
+                new ComparisonResult.Row("周期", List.of(new ComparisonResult.Cell("a",
+                        ComparisonResult.Status.FOUND, "", List.of(fixed, unverified)),
+                        new ComparisonResult.Cell("b", ComparisonResult.Status.NOT_FOUND, "", List.of())))),
+                List.of(conflict), new ComparisonResult.Metrics(2, 1, 100));
+        var sections = List.of(new GeneratedSection("疑似矛盾", conflict.text(), List.of()),
+                new GeneratedSection("逐项对比", "", List.of(first, second, target), claims));
+        var options = new ReportExportOptions(ReportExportOptions.CitationStyle.FILE_LOCATION, false, false);
+        var config = new ReportConfiguration("COMPARISON", "1", "对比", List.of(
+                new ReportConfiguration.Section("conflicts", "疑似矛盾", false, ""),
+                new ReportConfiguration.Section("matrix", "逐项对比", true, "")), "", options, List.of("费用"), "model", "1");
+        var doc = new GeneratedDocument("对比", conflict.text(), sections, List.of(first, second), "v2",
+                List.of("A", "B"), List.of(), List.of(first, second, target), compare, config, java.util.Map.of());
+        String text = pdfText(exporter.export(doc, "comparison"));
+        assertTrue(text.indexOf("1. 疑似矛盾") < text.indexOf("2. 逐项对比"));
+        String conflictSection = text.substring(text.indexOf("1. 疑似矛盾"), text.indexOf("2. 逐项对比"));
+        assertContains(conflictSection, "两份规范的固定周期不同。");
+        assertContains(conflictSection, "[A.pdf · 第 1 页 · 附件] [1]");
+        assertContains(conflictSection, "[B.pdf · 第 4 页]");
+        assertContains(text, "本次未找到依据");
+        assertContains(text, "检索失败");
+        String matrix = text.substring(text.indexOf("2. 逐项对比"));
+        assertContains(matrix, "换算值：720 小时");
+        assertContains(matrix, "比较字段未核验");
+        assertContains(matrix, "[A.pdf · 第 1 页 · 附件] [3]");
+        assertTrue(matrix.indexOf("[1]") < matrix.indexOf("比较字段未核验"));
+        assertTrue(matrix.indexOf("比较字段未核验") < matrix.indexOf("[3]"));
+        assertFalse(text.contains("证据附录"));
+    }
+
+    private String pdfText(ExportedFile file) throws Exception {
+        try (PDDocument document = Loader.loadPDF(file.path().toFile())) {
+            return new PDFTextStripper().getText(document);
+        }
+    }
+
+    @Test
     void export_stripsUnsafeCharsFromFileStem() throws Exception {
         ExportedFile exported = exporter.export(sampleDocument(), "../task-恶意路径/xyz");
 
@@ -128,5 +229,45 @@ class PdfExporterTest {
         // 字体缺失必须直接失败，由 Service 将任务置为 FAILED，不生成乱码 PDF
         assertThrows(IllegalStateException.class,
                 () -> failingExporter.export(sampleDocument(), "task-no-font"));
+    }
+    @Test
+    void export_addsSectionBookmarksPointingToSectionPages() throws Exception {
+        var sample = sampleDocument();
+        var longSection = new GeneratedSection("第一章 概述", "本段用于分页。\n".repeat(150), List.of());
+        var document = new GeneratedDocument(sample.title(), sample.summary(),
+                List.of(longSection, sample.sections().get(1)), sample.references());
+        Path output = exporter.export(document, "task-bookmarks").path();
+
+        try (PDDocument reopened = Loader.loadPDF(Files.readAllBytes(output))) {
+            PDDocumentOutline outline = reopened.getDocumentCatalog().getDocumentOutline();
+            assertNotNull(outline, "PDF 应包含文档书签");
+
+            PDOutlineItem firstSection = findBookmark(outline, "1. 第一章 概述");
+            PDOutlineItem secondSection = findBookmark(outline, "2. 第二章 安全事项");
+            assertNotNull(firstSection);
+            assertNotNull(secondSection);
+            assertNotNull(firstSection.getDestination());
+            assertNotNull(secondSection.getDestination());
+            assertTrue(reopened.getPages().indexOf(pageOf(firstSection)) >= 0);
+            int secondPage = reopened.getPages().indexOf(pageOf(secondSection));
+            assertTrue(secondPage > reopened.getPages().indexOf(pageOf(firstSection)));
+            PDFTextStripper stripper = new PDFTextStripper();
+            stripper.setStartPage(secondPage + 1);
+            stripper.setEndPage(secondPage + 1);
+            assertTrue(stripper.getText(reopened).contains("第二章 安全事项"));
+        }
+    }
+
+    private static PDOutlineItem findBookmark(PDDocumentOutline outline, String title) {
+        for (PDOutlineItem item : outline.children()) {
+            if (title.equals(item.getTitle())) {
+                return item;
+            }
+        }
+        return null;
+    }
+
+    private static org.apache.pdfbox.pdmodel.PDPage pageOf(PDOutlineItem item) throws java.io.IOException {
+        return ((PDPageDestination) item.getDestination()).getPage();
     }
 }

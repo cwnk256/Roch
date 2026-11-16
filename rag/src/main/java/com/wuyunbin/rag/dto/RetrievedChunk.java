@@ -43,7 +43,7 @@ public record RetrievedChunk(
 
     /**
      * 从 Spring AI Document 构造 RetrievedChunk。
-     * pageStart/pageEnd 当前切片元数据未携带，返回 null（不伪造）。
+     * 页码来自原文切片；旧切片或无页码格式返回 null。
      */
     public static RetrievedChunk from(Document doc) {
         Map<String, Object> md = doc.getMetadata();
@@ -58,8 +58,8 @@ public record RetrievedChunk(
                 str(md.get("file_name")),
                 doc.getText() == null ? "" : doc.getText(),
                 section,
-                null,
-                null,
+                intOrNull(md.get("page_start")),
+                intOrNull(md.get("page_end")),
                 intOrNull(md.get("chunk_index")),
                 rawScore != null ? rawScore : 0.0
         );

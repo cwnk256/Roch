@@ -1,6 +1,8 @@
 package com.wuyunbin.rag.service.generation;
 
 import com.wuyunbin.rag.service.generation.model.GeneratedSection;
+import com.wuyunbin.rag.service.generation.model.Claim;
+import com.wuyunbin.rag.service.generation.model.VerifiedSummary;
 
 import java.util.List;
 
@@ -18,4 +20,11 @@ public interface DocumentSummaryGenerator {
      * @return 摘要正文
      */
     String generate(String title, String instruction, List<GeneratedSection> sections);
+
+    default VerifiedSummary generateSummary(String title, String instruction, List<GeneratedSection> sections) {
+        String text = generate(title, instruction, sections);
+        if (text == null || text.isBlank()) return new VerifiedSummary("", List.of(), List.of());
+        Claim claim = Claim.unsupported("S1", text, "摘要没有关联已核验事实。");
+        return new VerifiedSummary(text, List.of(claim.claimId()), List.of(claim));
+    }
 }

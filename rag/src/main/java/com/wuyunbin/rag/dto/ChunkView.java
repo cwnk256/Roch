@@ -11,7 +11,7 @@ import java.util.Map;
  * chunk_pipeline_version, chunk_strategy, section_id, section_path, section_level,
  * block_type, code_lang, file_size, created_at。</p>
  *
- * <p>pageStart/pageEnd 当前未持久化，返回 null（不伪造）。</p>
+ * <p>PDF 切片保留来源页码，旧切片或无页码格式返回 null。</p>
  */
 @Schema(description = "文档切片视图")
 public record ChunkView(
@@ -28,10 +28,10 @@ public record ChunkView(
         @Schema(description = "切片正文（仅 chunks 接口返回完整正文，列表/详情不返回）")
         String content,
 
-        @Schema(description = "页码起始（当前未持久化，返回 null）")
+        @Schema(description = "页码起始（原文无页码时返回 null）")
         Integer pageStart,
 
-        @Schema(description = "页码结束（当前未持久化，返回 null）")
+        @Schema(description = "页码结束（原文无页码时返回 null）")
         Integer pageEnd,
 
         @Schema(description = "章节路径")
@@ -57,8 +57,8 @@ public record ChunkView(
                 str(row.get("doc_md5")),
                 str(row.get("file_name")),
                 str(row.get("content")),
-                null,
-                null,
+                intOrNull(row.get("page_start")),
+                intOrNull(row.get("page_end")),
                 str(row.get("section_path")),
                 intOrNull(row.get("chunk_index")),
                 intOrNull(row.get("chunk_total")),

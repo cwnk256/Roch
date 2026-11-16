@@ -5,6 +5,7 @@ import com.wuyunbin.rag.dto.WeatherResponse;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.ResponseEntity;
@@ -20,6 +21,7 @@ public class RestTests {
     private RestTemplate restTemplate;
 
     @Test
+    @EnabledIfEnvironmentVariable(named = "AMAP_GEO_KEY", matches = ".+")
     public void test01() {
         URI uri = UriComponentsBuilder
                 .fromUriString("https://restapi.amap.com/v3/geocode/geo")
@@ -45,6 +47,7 @@ public class RestTests {
 
 
     @Test
+    @EnabledIfEnvironmentVariable(named = "AMAP_WEATHER_KEY", matches = ".+")
     public void test02() {
         URI uri = UriComponentsBuilder
                 .fromUriString("https://restapi.amap.com/v3/weather/weatherInfo")
