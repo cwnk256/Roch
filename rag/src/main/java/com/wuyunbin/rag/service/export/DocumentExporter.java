@@ -2,6 +2,7 @@ package com.wuyunbin.rag.service.export;
 
 import com.wuyunbin.rag.dto.ReportExportOptions;
 import com.wuyunbin.rag.service.generation.model.GeneratedDocument;
+import java.nio.file.Path;
 
 /**
  * 文档导出器：把结构化 {@link GeneratedDocument} 渲染为文件。
@@ -23,4 +24,6 @@ public interface DocumentExporter {
     }
 
     ExportedFile export(GeneratedDocument document, String fileStem, ReportExportOptions overrides);
+
+    ExportedFile export(GeneratedDocument document, String fileStem, ReportExportOptions overrides, Path outputRoot);
 }

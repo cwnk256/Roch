@@ -1,6 +1,7 @@
 package com.wuyunbin.rag.config;
 
 import com.wuyunbin.rag.cleaning.ChunkingProperties;
+import com.wuyunbin.rag.desktop.DesktopChatOptions;
 import com.wuyunbin.rag.splitter.SemanticTextSplitter;
 import com.wuyunbin.rag.tool.AmapTools;
 import com.wuyunbin.rag.tool.WebPageTools;
@@ -10,6 +11,7 @@ import org.springframework.ai.chat.memory.ChatMemoryRepository;
 import org.springframework.ai.chat.memory.MessageWindowChatMemory;
 import org.springframework.ai.embedding.EmbeddingModel;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -23,9 +25,9 @@ public class ChatConfig {
     }
 
     @Bean
-    public ChatClient chatClient(ChatClient.Builder builder, AmapTools amapTools) {
+    public ChatClient chatClient(ChatClient.Builder builder, ObjectProvider<DesktopChatOptions> desktopOptions) {
+        desktopOptions.ifAvailable(builder::defaultAdvisors);
         return builder.build();
-
     }
 
     /**
@@ -47,10 +49,11 @@ public class ChatConfig {
      */
     @Bean
     public ChatClient multiTurnChatClient(ChatClient.Builder builder, ChatMemory chatMemory,
-                                          AmapTools amapTools, WebPageTools webPageTools) {
-        return builder.clone()
-                .defaultTools(amapTools, webPageTools)
-                .build();
+                                          AmapTools amapTools, WebPageTools webPageTools,
+                                          ObjectProvider<DesktopChatOptions> desktopOptions) {
+        var multiTurn = builder.clone().defaultTools(amapTools, webPageTools);
+        desktopOptions.ifAvailable(multiTurn::defaultAdvisors);
+        return multiTurn.build();
     }
 
     /**

@@ -1,0 +1,53 @@
+<Window x:Class="Roch.Desktop.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Roch" Width="1180" Height="820" MinWidth="650" MinHeight="450"
+        WindowStartupLocation="CenterScreen" Background="#F2F7F4">
+    <Window.Resources>
+        <Style TargetType="{x:Type Button}">
+            <Setter Property="Padding" Value="16,8"/>
+            <Setter Property="Margin" Value="0,0,8,8"/>
+            <Setter Property="Cursor" Value="Hand"/>
+        </Style>
+    </Window.Resources>
+    <Grid>
+        <ScrollViewer x:Name="StartupPanel" VerticalScrollBarVisibility="Auto">
+            <Border Background="White" BorderBrush="#DDEAE1" BorderThickness="1" CornerRadius="12"
+                    Padding="34" Width="560" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="20">
+                <StackPanel>
+                    <TextBlock Text="Roch" FontSize="34" FontWeight="SemiBold" Foreground="#163F31"/>
+                    <TextBlock Text="启动工作台" FontSize="20" Margin="0,8,0,12" Foreground="#234E3F"/>
+                    <TextBlock x:Name="StartupStatus" Text="正在检查本机依赖…" TextWrapping="Wrap"
+                               Foreground="#34584C" Margin="0,0,0,20" FontSize="14" AutomationProperties.LiveSetting="Polite"/>
+                    <Grid Margin="0,0,0,20">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition/>
+                            <ColumnDefinition/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Margin="0,0,12,0">
+                            <TextBlock Text="PostgreSQL 端口" Margin="0,0,0,4"/>
+                            <TextBox x:Name="PostgresPort" Padding="7" AutomationProperties.Name="PostgreSQL 端口"/>
+                        </StackPanel>
+                        <StackPanel Grid.Column="1">
+                            <TextBlock Text="Milvus 端口" Margin="0,0,0,4"/>
+                            <TextBox x:Name="MilvusPort" Padding="7" AutomationProperties.Name="Milvus 端口"/>
+                        </StackPanel>
+                    </Grid>
+                    <WrapPanel>
+                        <Button x:Name="StartStorage" Content="启动存储服务" Click="StartStorageClicked"/>
+                        <Button x:Name="Retry" Content="重试" Click="RetryClicked"/>
+                        <Button Content="查看日志" Click="OpenLogs"/>
+                        <Button x:Name="WebViewHelp" Content="获取 WebView2" Click="OpenWebViewHelp" Visibility="Collapsed"/>
+                    </WrapPanel>
+                </StackPanel>
+            </Border>
+        </ScrollViewer>
+        <ContentControl x:Name="Workspace" Visibility="Collapsed"/>
+        <DockPanel x:Name="Preview" Visibility="Collapsed">
+            <Border DockPanel.Dock="Top" Background="#F2F7F4" Padding="12,8,12,0">
+                <Button Content="返回工作台" Click="ClosePreview" HorizontalAlignment="Left"/>
+            </Border>
+            <ContentControl x:Name="PreviewContent"/>
+        </DockPanel>
+    </Grid>
+</Window>

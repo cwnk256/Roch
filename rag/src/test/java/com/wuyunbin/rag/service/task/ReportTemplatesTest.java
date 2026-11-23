@@ -50,11 +50,15 @@ class ReportTemplatesTest {
                 original.getInstruction(), new ReportExportOptions(ReportExportOptions.CitationStyle.FILE_LOCATION,
                 false, true), List.of(), null, null);
         original.setConfiguration(archived);
+        var generation = new ReportGenerationSnapshot("test-model", "http://127.0.0.1:1234",
+                0.35, null, 2048, "C:/Reports/旧目录");
+        original.setGenerationSnapshot(generation);
         original.markFailed("retry");
         store.save(original);
         var retry = service.retry(original.getTaskId());
         assertNotEquals(original.getTaskId(), retry.taskId());
         assertEquals(archived, retry.configuration());
+        assertEquals(generation, store.find(retry.taskId()).orElseThrow().getGenerationSnapshot());
         assertEquals(DocumentTaskStatus.FAILED, store.find(original.getTaskId()).orElseThrow().getStatus());
         verify(runner).submit(retry.taskId());
     }
@@ -96,6 +100,18 @@ class ReportTemplatesTest {
         verify(artifacts, times(2)).register(task.getTaskId(), file);
         verify(results, never()).save(anyString(), any());
         verifyNoInteractions(generator, model);
+    }
+
+    @Test
+    void rejectedSubmissionLeavesARetryableTask() {
+        var store = new InMemoryDocumentTaskStore();
+        var runner = mock(DocumentTaskRunner.class);
+        doThrow(new java.util.concurrent.RejectedExecutionException()).when(runner).submit(anyString());
+        var service = new DocumentTaskService(mock(DocumentTaskValidator.class), store, mock(GeneratedDocumentStorage.class),
+                mock(TaskArtifactService.class), runner);
+        var failed = service.createAndExecute(new DocumentTaskRequest(DocumentTaskType.SUMMARY, List.of("a"), "摘要"));
+        assertEquals(DocumentTaskStatus.FAILED, failed.status());
+        assertEquals("TASK_QUEUE_FULL", store.find(failed.taskId()).orElseThrow().getErrorCode());
     }
 
     @Test

@@ -32,6 +32,10 @@ Roch 使用检索增强生成（RAG）处理用户选定的文档，支持知识
 
 自动判断需要人工复核。实际验收中，自由文本曾将等值预算描述为冲突，该句被标为“证据不足”。来源存在也不能保证结论正确，阅读时应同时核对摘录、适用条件和支持状态。
 
+## Windows 桌面版
+
+桌面版从 Windows 开始菜单启动，在应用内配置 LM Studio 和报告输出目录，并使用独立的 Docker 存储服务。安装、数据保留及构建命令见 [Windows 安装说明](WINDOWS.md)。
+
 ## 技术与依赖
 
 下表的依赖版本来自本仓库 [后端 POM](rag/pom.xml)、[前端依赖](web/package.json)、[前端锁定文件](web/package-lock.json) 和 [Compose 文件](compose.yaml)。配置默认值来自 [应用配置](rag/src/main/resources/application.properties)。

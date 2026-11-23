@@ -48,6 +48,7 @@ public class AmapTools {
      */
     @Tool(description = "根据地名查询地理编码信息，返回区域编码(adcode)和格式化地址。当用户询问某个地点的天气时，先用此工具获取区域编码。参数address是地名，如\"福州\"、\"厦门理工学院\"")
     public String geocode(String address) {
+        if (geoKey.isBlank()) return "请配置高德地理编码密钥后重试。桌面版可在设置中配置。";
         log.info("Tool geocode called: address={}", address);
         try {
             URI uri = UriComponentsBuilder
@@ -66,8 +67,8 @@ public class AmapTools {
             return String.format("地名：%s\n区域编码(adcode)：%s\n格式化地址：%s\n经纬度：%s",
                     address, geo.getAdcode(), geo.getFormatted_address(), geo.getLocation());
         } catch (Exception e) {
-            log.error("地理编码查询失败: address={}", address, e);
-            return "地理编码查询失败：" + e.getMessage();
+            log.warn("地理编码查询失败: {}", e.getClass().getSimpleName());
+            return "地理编码查询失败，请检查网络和高德配置。";
         }
     }
 
@@ -79,6 +80,7 @@ public class AmapTools {
      */
     @Tool(description = "根据城市区域编码(adcode)查询实况天气。参数adcode是6位区域编码，如350100表示福州。先用geocode工具获取adcode，再用此工具查天气")
     public String getWeather(String adcode) {
+        if (weatherKey.isBlank()) return "请配置高德天气密钥后重试。桌面版可在设置中配置。";
         log.info("Tool getWeather called: adcode={}", adcode);
         try {
             URI uri = UriComponentsBuilder
@@ -99,8 +101,8 @@ public class AmapTools {
                     live.getWinddirection(), live.getWindpower(), live.getHumidity(),
                     live.getReporttime());
         } catch (Exception e) {
-            log.error("天气查询失败: adcode={}", adcode, e);
-            return "天气查询失败：" + e.getMessage();
+            log.warn("天气查询失败: {}", e.getClass().getSimpleName());
+            return "天气查询失败，请检查网络和高德配置。";
         }
     }
 }

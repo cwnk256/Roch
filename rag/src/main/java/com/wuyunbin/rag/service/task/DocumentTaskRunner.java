@@ -4,6 +4,7 @@ import com.wuyunbin.rag.dto.DocumentTask;
 import com.wuyunbin.rag.dto.DocumentTaskRequest;
 import com.wuyunbin.rag.dto.DocumentArtifactResponse;
 import com.wuyunbin.rag.dto.ReportExportOptions;
+import com.wuyunbin.rag.desktop.DesktopChatOptions;
 import org.springframework.ai.chat.model.ChatModel;
 import com.wuyunbin.rag.service.export.DocumentExporter;
 import com.wuyunbin.rag.service.export.ExportedFile;
@@ -18,6 +19,7 @@ import org.springframework.stereotype.Service;
 import java.util.HashSet;
 import java.util.UUID;
 import java.util.concurrent.Executor;
+import java.nio.file.Path;
 
 @Service
 @Slf4j
@@ -39,8 +41,10 @@ public class DocumentTaskRunner {
         executor.execute(() -> run(taskId));
     }
 
-    public DocumentArtifactResponse reExport(String taskId, GeneratedDocument document, ReportExportOptions options) {
-        ExportedFile exported = exporter.export(document, taskId + "-reexport-" + UUID.randomUUID(), options);
+    public DocumentArtifactResponse reExport(String taskId, GeneratedDocument document, ReportExportOptions options, Path output) {
+        String fileStem = taskId + "-reexport-" + UUID.randomUUID();
+        ExportedFile exported = output == null ? exporter.export(document, fileStem, options)
+                : exporter.export(document, fileStem, options, output);
         return artifacts.register(taskId, exported);
     }
 
@@ -60,14 +64,19 @@ public class DocumentTaskRunner {
             if (configuration == null) {
                 configuration = ReportTemplates.resolve(new DocumentTaskRequest(task.getType(), task.getDocumentIds(), task.getInstruction()));
             }
-            GeneratedDocument result = generator.execute(task).withConfiguration(configuration.withGenerationMetadata(
-                    chatModel.getOptions().getModel(), "traceable-report-v2.1"));
+            var snapshot = task.getGenerationSnapshot();
+            var model = snapshot == null ? chatModel.getOptions().getModel() : snapshot.model();
+            var output = snapshot == null ? null : Path.of(snapshot.outputDirectory());
+            GeneratedDocument result = DesktopChatOptions.withReportSnapshot(snapshot, () -> generator.execute(task))
+                    .withConfiguration(configuration.withGenerationMetadata(model, "traceable-report-v2.1"));
             evidenceValidator.validate(result, new HashSet<>(task.getDocumentIds()));
-            results.save(taskId, result);
+            if (output == null) results.save(taskId, result);
+            else results.save(taskId, result, output);
             task.updateProgress(75, "EXPORTING");
             tasks.update(task);
             progressPublisher.publish(task);
-            ExportedFile exported = exporter.export(result, taskId);
+            ExportedFile exported = output == null ? exporter.export(result, taskId)
+                    : exporter.export(result, taskId, null, output);
             artifacts.register(taskId, exported);
             task.markCompleted(result.title(), exported.path().toString(), exported.fileName());
             tasks.update(task);

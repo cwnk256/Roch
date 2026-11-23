@@ -30,7 +30,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -106,11 +105,16 @@ public class PdfExporter implements DocumentExporter {
 
     @Override
     public ExportedFile export(GeneratedDocument document, String fileStem, ReportExportOptions overrides) {
+        return export(document, fileStem, overrides, Path.of(properties.getOutputDir()));
+    }
+
+    @Override
+    public ExportedFile export(GeneratedDocument document, String fileStem, ReportExportOptions overrides, Path outputRoot) {
         if (document == null) {
             throw new IllegalArgumentException("待导出文档不能为空");
         }
         String safeStem = sanitizeFileStem(fileStem);
-        Path outputDir = Paths.get(properties.getOutputDir(), safeStem);
+        Path outputDir = outputRoot.resolve(safeStem);
         try {
             Files.createDirectories(outputDir);
         } catch (IOException e) {
