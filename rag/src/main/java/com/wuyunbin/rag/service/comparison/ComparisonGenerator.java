@@ -93,24 +93,18 @@ public class ComparisonGenerator {
         }
         if (selected.isEmpty()) return missing(source);
 
-        var explicit = ExplicitComparisonFacts.select(dimension, selected);
-        List<ComparisonCandidate> candidates = explicit.facts();
-        boolean incomplete = false;
-        if (explicit.needsModel()) {
-            run.modelCalls++;
-            try {
-                candidates = ExplicitComparisonFacts.merge(explicit, extractor.extract(dimension, config, selected));
-            } catch (RuntimeException ex) {
-                log.warn("对比事实提取失败 document={} dimension={}", source.documentId(), dimension, ex);
-                if (candidates.isEmpty()) {
-                    return new Cell(source.documentId(), Status.EXTRACTION_FAILED, "模型未能完成事实提取", List.of());
-                }
-                incomplete = true;
-            }
+        List<ComparisonCandidate> candidates;
+        run.modelCalls++;
+        try {
+            candidates = extractor.extract(dimension, config, selected);
+        } catch (RuntimeException ex) {
+            log.warn("对比事实提取失败 document={} dimension={}", source.documentId(), dimension, ex);
+            return new Cell(source.documentId(), Status.EXTRACTION_FAILED, "模型未能完成事实提取", List.of());
         }
         if (candidates.isEmpty()) return missing(source);
         List<Fact> facts = new ArrayList<>();
-        for (ComparisonCandidate candidate : candidates) {
+        for (ComparisonCandidate selectedCandidate : candidates) {
+            var candidate = ExplicitComparisonFacts.completeFields(dimension, selectedCandidate);
             String claimId = prefix + (facts.size() + 1);
             var verified = verifier.verify(claimId, candidate.statement(),
                     List.of(new ClaimVerifier.Citation(candidate.source(), candidate.quote())), selected, scope);
@@ -128,8 +122,8 @@ public class ComparisonGenerator {
         }
         boolean found = facts.stream().anyMatch(Fact::verified);
         return new Cell(source.documentId(), found ? Status.FOUND : Status.UNVERIFIED,
-                incomplete ? "部分原文的事实提取失败" : facts.stream().allMatch(Fact::verified) ? ""
-                        : "部分或全部原文、事实或比较字段未通过核验", List.copyOf(facts));
+                facts.stream().allMatch(Fact::verified) ? "" : "部分或全部原文、事实或比较字段未通过核验",
+                List.copyOf(facts));
     }
 
     private static Cell missing(Source source) {

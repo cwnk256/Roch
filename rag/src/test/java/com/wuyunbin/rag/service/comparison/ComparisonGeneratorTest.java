@@ -116,16 +116,57 @@ class ComparisonGeneratorTest {
         verifyNoInteractions(retrieval);
     }
 
+    @Test void matchesOnlyFactsSelectedUnderTheUserAndSectionInstructions() {
+        String selectedQuote = "Z82 设备必须按每 4 周一次的固定周期校准。";
+        String excludedQuote = "Z83 设备必须按每 5 周一次的固定周期校准。";
+        var request = new DocumentTaskRequest(DocumentTaskType.COMPARE, List.of("A", "B"), "仅对比 Z82 设备",
+                "COMPARISON", "1", List.of(new DocumentTaskRequest.SectionSelection("matrix", "排除 Z83 设备")),
+                null, List.of("固定校准周期"));
+        var task = DocumentTask.create(request.type(), request.documentIds(), request.instruction());
+        var configuration = ReportTemplates.resolve(request);
+        task.setConfiguration(configuration);
+        var a = hit("A", selectedQuote + excludedQuote);
+        var b = hit("B", excludedQuote);
+        when(retrieval.search(anyString(), any())).thenAnswer(call ->
+                ((RetrievalOptions) call.getArgument(1)).documentIds().contains("A") ? List.of(a) : List.of(b));
+        when(extractor.extract(eq("固定校准周期"), same(configuration), eq(List.of(a)))).thenReturn(
+                List.of(new ComparisonCandidate(1, selectedQuote, "Z82", "", "", "校准", "4", "周")));
+        when(extractor.extract(eq("固定校准周期"), same(configuration), eq(List.of(b)))).thenReturn(List.of());
+
+        var report = generator.generate(task, 8, .5);
+        var cells = report.comparison().rows().getFirst().cells();
+        assertEquals(List.of(Status.FOUND, Status.NOT_FOUND), cells.stream().map(Cell::status).toList());
+        assertEquals(List.of(selectedQuote), report.evidenceSnapshots().stream().map(Evidence::quote).toList());
+        assertTrue(configuration.sections().getFirst().instruction().contains("排除 Z83 设备"));
+        verify(extractor, times(2)).extract(eq("固定校准周期"), same(configuration), anyList());
+    }
+
     @Test void retrievesOnlyRelevantAtomicEvidenceAndAlignsFieldsIndependentOfWording() {
         var task = task(List.of("A", "B", "C"), List.of("固定校准周期", "检修断电", "年度设备预算"));
+        String firstPower = "检修 Z82 设备前必须断电。";
+        String secondPower = "检修 Z82 设备前须切断电源。";
+        String firstCycle = "常规环境下，Z82 设备必须按每 4 周一次的固定周期校准。";
+        String secondCycle = "设备 Z82 在常规环境的固定校验周期为 35 天。";
+        String firstBudget = "临海项目 2027 年度设备预算为 0.5 万元。";
+        String secondBudget = "临海项目 2027 年设备预算为 5,000 元。";
+        String spending = "临海项目 2027 年上半年设备实际支出为 0.3 万元。";
         var documents = Map.of(
-                "A", hit("A", "适用于本项目。检修 Z82 设备前必须断电。常规环境下，Z82 设备必须按每 4 周一次的固定周期校准。"
-                        + "临海项目 2027 年度设备预算为 0.5 万元。"),
-                "B", hit("B", "检修 Z82 设备前须切断电源。设备 Z82 在常规环境的固定校验周期为 35 天。"
-                        + "临海项目 2027 年设备预算为 5,000 元。临海项目 2027 年上半年设备实际支出为 0.3 万元。"),
+                "A", hit("A", "适用于本项目。" + firstPower + firstCycle + firstBudget),
+                "B", hit("B", secondPower + secondCycle + secondBudget + spending),
                 "C", hit("C", "临海项目的设备范围包括 Z82。"));
+        var selectedQuotes = Map.of(
+                "固定校准周期", Map.of("A", List.of(firstCycle), "B", List.of(secondCycle)),
+                "检修断电", Map.of("A", List.of(firstPower), "B", List.of(secondPower)),
+                "年度设备预算", Map.of("A", List.of(firstBudget), "B", List.of(secondBudget, spending)));
         when(retrieval.search(anyString(), any())).thenAnswer(call -> List.of(documents.get(
                 ((RetrievalOptions) call.getArgument(1)).documentIds().iterator().next())));
+        when(extractor.extract(anyString(), any(), anyList())).thenAnswer(call -> {
+            String dimension = call.getArgument(0);
+            List<RetrievedChunk> selected = call.getArgument(2);
+            return selectedQuotes.get(dimension).getOrDefault(selected.getFirst().documentId(), List.of()).stream()
+                    .map(quote -> new ComparisonCandidate(1, quote, "", "", "", "", "", ""))
+                    .toList();
+        });
         var report = generator.generate(task, 8, .5);
         var matrix = report.comparison();
         assertEquals(List.of(1, 1, 0, 1, 1, 0, 1, 2, 0), matrix.rows().stream()
