@@ -33,4 +33,24 @@ public interface SectionGenerator {
         return generate(type, plan, chunks == null ? List.of() : chunks.stream()
                 .filter(c -> c != null && c.documentId() != null && allowedDocumentIds.contains(c.documentId())).toList());
     }
+
+    default GeneratedSection generateBatch(DocumentTaskType type, ReportSectionPlan plan, List<RetrievedChunk> chunks,
+                                           Set<String> allowedDocumentIds, String batchId, boolean strict) {
+        return generate(type, plan, chunks, allowedDocumentIds);
+    }
+
+    enum BatchFailureKind { INVALID_RESPONSE, TIMEOUT }
+
+    class BatchFailure extends RuntimeException {
+        private final BatchFailureKind failureKind;
+
+        public BatchFailure(BatchFailureKind failureKind, Throwable cause) {
+            super(failureKind.name(), cause);
+            this.failureKind = failureKind;
+        }
+
+        public BatchFailureKind failureKind() {
+            return failureKind;
+        }
+    }
 }

@@ -27,7 +27,8 @@ class ComparisonGeneratorTest {
         var properties = new DocumentTaskProperties();
         properties.setMaxContextChars(4000);
         generator = new ComparisonGenerator(retrieval, extractor, new ClaimVerifier(chunks, support),
-                mock(DocumentService.class), new GeneratedDocumentAssembler(), properties);
+                mock(DocumentService.class), new GeneratedDocumentAssembler(), properties,
+                mock(TaskEvidenceRetrieval.class), mock(TaskEvidenceLog.class));
         when(support.judge(anyString(), anyList())).thenReturn(
                 new ClaimSupportJudge.Judgment(SupportStatus.SUPPORTED, "与完整原句一致"));
     }

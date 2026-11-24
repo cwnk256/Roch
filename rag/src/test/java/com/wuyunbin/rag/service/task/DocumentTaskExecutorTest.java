@@ -41,6 +41,7 @@ class DocumentTaskExecutorTest {
     private DocumentSummaryGenerator summaryGenerator;
     private DocumentService documentService;
     private DocumentTaskExecutor executor;
+    private TaskEvidenceRetrieval taskRetrieval;
 
     @BeforeEach
     @SuppressWarnings("unchecked")
@@ -53,10 +54,12 @@ class DocumentTaskExecutorTest {
         documentService = mock(DocumentService.class);
         // 组装器使用真实实现，连带验证章节保序 + Evidence 去重
         GeneratedDocumentAssembler assembler = new GeneratedDocumentAssembler();
+        taskRetrieval = mock(TaskEvidenceRetrieval.class);
 
         executor = new DocumentTaskExecutor(
                 documentRetriever, chunkRetriever, outlineGenerator,
-                sectionGenerator, summaryGenerator, assembler, documentService, mock(ComparisonGenerator.class));
+                sectionGenerator, summaryGenerator, assembler, documentService, mock(ComparisonGenerator.class),
+                taskRetrieval, mock(TaskEvidenceLog.class), new DocumentTaskProperties());
         ReflectionTestUtils.setField(executor, "defaultTopK", 8);
         ReflectionTestUtils.setField(executor, "defaultThreshold", 0.5);
     }
@@ -192,5 +195,33 @@ class DocumentTaskExecutorTest {
         // 章节失败必须向上抛出（由 Service 转为整个任务 FAILED，不静默跳过）
         RuntimeException ex = assertThrows(RuntimeException.class, () -> executor.execute(task));
         assertTrue(ex.getMessage().contains("LLM 服务不可用"));
+    }
+
+    @Test
+    void fullStrategyKeepsTheSuccessfulBatchWhenAnotherBatchTimesOut() {
+        DocumentTask task = runningTask();
+        var settings = new ReportRetrievalSettings("full", 8, 0.35, 40, 40);
+        var plan = new ReportConfiguration("ANALYSIS", "1", "报告",
+                List.of(new ReportConfiguration.Section("findings", "事实", true, "保留条件。")),
+                "1. 数量\n2. 条件\n3. 金额\n4. 时间\n5. 范围",
+                null, List.of(), null, null).withRetrieval(settings);
+        task.setConfiguration(plan);
+        when(taskRetrieval.hybrid(anyString(), eq(SELECTED), eq(settings)))
+                .thenAnswer(call -> List.of(new RetrievedChunk(call.getArgument(0), "docA", "a.txt",
+                        "示例", "", null, null, 0, 0.8)));
+        var known = new Claim("C-1-1-1", "已处理", List.of(), SupportStatus.INSUFFICIENT, "测试", true);
+        when(sectionGenerator.generateBatch(any(), any(), anyList(), eq(SELECTED), eq("C-1-1-"), eq(true)))
+                .thenReturn(new GeneratedSection("事实", "已处理", List.of(), List.of(known)));
+        when(sectionGenerator.generateBatch(any(), any(), anyList(), eq(SELECTED), eq("C-1-2-"), eq(true)))
+                .thenThrow(new SectionGenerator.BatchFailure(SectionGenerator.BatchFailureKind.TIMEOUT, null));
+        when(summaryGenerator.generateSummary(anyString(), anyString(), anyList()))
+                .thenReturn(new VerifiedSummary("摘要", List.of(), List.of()));
+
+        var section = executor.execute(task).sections().getFirst();
+        assertEquals(List.of("C-1-1-1", "C-1-2-1"), section.claims().stream().map(Claim::claimId).toList());
+        assertTrue(section.content().contains("已处理"));
+        assertTrue(section.content().contains("范围（本批次生成失败）"));
+        verify(taskRetrieval, times(5)).hybrid(anyString(), eq(SELECTED), eq(settings));
+        verifyNoInteractions(chunkRetriever);
     }
 }

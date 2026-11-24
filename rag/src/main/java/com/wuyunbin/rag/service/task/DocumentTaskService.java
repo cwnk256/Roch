@@ -25,6 +25,7 @@ public class DocumentTaskService {
     private final GeneratedDocumentStorage generatedDocumentStorage;
     private final TaskArtifactService artifactService;
     private final DocumentTaskRunner runner;
+    private final DocumentTaskProperties properties;
 
     /**
      * 创建文档任务并提交给后台执行器。
@@ -35,7 +36,7 @@ public class DocumentTaskService {
     public DocumentTaskResponse createAndExecute(DocumentTaskRequest request) {
         // 1. 参数校验
         validator.validateRequest(request);
-        ReportConfiguration configuration = ReportTemplates.resolve(request);
+        ReportConfiguration configuration = ReportTemplates.resolve(request).withRetrieval(properties.snapshotRetrieval());
         // 2. 资料范围校验：先校验再建任务，非法引用不产生残留任务
         validator.validateDocumentsExist(request.documentIds());
 

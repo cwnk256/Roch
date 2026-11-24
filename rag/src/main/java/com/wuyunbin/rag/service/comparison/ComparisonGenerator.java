@@ -9,6 +9,8 @@ import com.wuyunbin.rag.service.generation.LlmSectionGenerator;
 import com.wuyunbin.rag.service.generation.model.*;
 import com.wuyunbin.rag.service.task.ComparisonLimits;
 import com.wuyunbin.rag.service.task.DocumentTaskProperties;
+import com.wuyunbin.rag.service.task.TaskEvidenceLog;
+import com.wuyunbin.rag.service.task.TaskEvidenceRetrieval;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -28,6 +30,8 @@ public class ComparisonGenerator {
     private final DocumentService documentService;
     private final GeneratedDocumentAssembler assembler;
     private final DocumentTaskProperties properties;
+    private final TaskEvidenceRetrieval taskRetrieval;
+    private final TaskEvidenceLog evidenceLog;
 
     private static class Run {
         final List<Claim> claims = new ArrayList<>();
@@ -51,11 +55,12 @@ public class ComparisonGenerator {
             List<Cell> cells = new ArrayList<>();
             for (Source source : sources) {
                 String prefix = "M-" + (rows.size() + 1) + "-" + (cells.size() + 1) + "-";
-                cells.add(collect(source, dimension, config, prefix, topK, threshold, run));
+                cells.add(collect(task.getTaskId(), rows.size() + 1, cells.size() + 1,
+                        source, dimension, config, prefix, topK, threshold, run));
             }
             rows.add(new Row(dimension, List.copyOf(cells)));
         }
-        List<Conclusion> conclusions = ComparisonRules.conclusions(sources, rows);
+        List<Conclusion> conclusions = ComparisonRules.conclusions(sources, rows, strict(config));
         List<GeneratedSection> sections = new ArrayList<>();
         List<Conclusion> published = new ArrayList<>();
         for (var section : config.sections()) {
@@ -79,16 +84,31 @@ public class ComparisonGenerator {
         return assembler.assemble(config.title(), summary, sections).withComparison(comparison).withConfiguration(config);
     }
 
-    private Cell collect(Source source, String dimension, ReportConfiguration config, String prefix,
-                         int topK, double threshold, Run run) {
+    private Cell collect(String taskId, int section, int batch, Source source, String dimension,
+                         ReportConfiguration config, String prefix, int topK, double threshold, Run run) {
         Set<String> scope = Set.of(source.documentId());
+        ReportRetrievalSettings settings = config.retrieval();
+        boolean strict = strict(config);
+        String requestedScope = comparisonScope(dimension, config);
         List<RetrievedChunk> selected;
         run.retrievalCalls++;
+        long started = System.nanoTime();
         try {
-            var hits = retrieval.search(dimension, new RetrievalOptions(Math.min(8, Math.max(1, topK)), threshold, scope));
-            selected = LlmSectionGenerator.selectWithinBudget(hits, scope, Math.min(8000, properties.getMaxContextChars()));
+            boolean hybrid = settings != null && settings.hybrid();
+            int savedTopK = settings == null ? topK : settings.topK();
+            int selectedLimit = Math.min(8, Math.max(1, savedTopK));
+            double savedThreshold = settings == null ? threshold : settings.threshold();
+            var hits = hybrid
+                    ? taskRetrieval.hybrid(settings.splitQuestions() ? requestedScope : dimension, scope, settings)
+                    : retrieval.search(dimension, new RetrievalOptions(selectedLimit, savedThreshold, scope,
+                            settings == null ? null : settings.baselineMode()));
+            int budget = settings == null ? Math.min(8000, properties.getMaxContextChars()) : settings.comparisonMaxChars();
+            selected = LlmSectionGenerator.selectWithinBudget(hits.stream().limit(selectedLimit).toList(), scope, budget);
+            evidenceLog.event(taskId, section, batch, "context", selected.isEmpty() ? "empty" : "selected",
+                    hits.size(), selected, started);
         } catch (RuntimeException ex) {
             log.warn("对比检索失败 document={} dimension={}", source.documentId(), dimension, ex);
+            evidenceLog.event(taskId, section, batch, "retrieval", "failed", 0, List.of(), started);
             return new Cell(source.documentId(), Status.RETRIEVAL_FAILED, "检索失败", List.of());
         }
         if (selected.isEmpty()) return missing(source);
@@ -96,18 +116,26 @@ public class ComparisonGenerator {
         List<ComparisonCandidate> candidates;
         run.modelCalls++;
         try {
-            candidates = extractor.extract(dimension, config, selected);
+            candidates = strict ? extractWithRetry(dimension, config, selected, run)
+                    : extractor.extract(dimension, config, selected);
         } catch (RuntimeException ex) {
             log.warn("对比事实提取失败 document={} dimension={}", source.documentId(), dimension, ex);
+            evidenceLog.event(taskId, section, batch, "generation", "extraction-failed", selected.size(), List.of(), started);
             return new Cell(source.documentId(), Status.EXTRACTION_FAILED, "模型未能完成事实提取", List.of());
         }
-        if (candidates.isEmpty()) return missing(source);
+        if (candidates.isEmpty()) {
+            evidenceLog.event(taskId, section, batch, "generation", "not-found", selected.size(), List.of(), started);
+            return missing(source);
+        }
         List<Fact> facts = new ArrayList<>();
         for (ComparisonCandidate selectedCandidate : candidates) {
-            var candidate = ExplicitComparisonFacts.completeFields(dimension, selectedCandidate);
+            var candidate = selectedCandidate.source() <= 0 ? selectedCandidate
+                    : ExplicitComparisonFacts.completeFields(dimension, selectedCandidate);
             String claimId = prefix + (facts.size() + 1);
-            var verified = verifier.verify(claimId, candidate.statement(),
-                    List.of(new ClaimVerifier.Citation(candidate.source(), candidate.quote())), selected, scope);
+            var citations = List.of(new ClaimVerifier.Citation(candidate.source(), candidate.quote()));
+            var verified = strict
+                    ? verifier.verifyStrict(claimId, candidate.statement(), citations, selected, scope, requestedScope)
+                    : verifier.verify(claimId, candidate.statement(), citations, selected, scope);
             if (verified.evidences().stream().anyMatch(e -> e.sourceStatus() == SourceStatus.MATCHED)) {
                 // The shared verifier invokes one support judgment for a single matched citation.
                 run.modelCalls++;
@@ -115,15 +143,56 @@ public class ComparisonGenerator {
             boolean supported = verified.claim().supportStatus() == SupportStatus.SUPPORTED;
             var originalQuote = verified.evidences().stream().filter(e -> e.sourceStatus() == SourceStatus.MATCHED)
                     .map(Evidence::quote).findFirst().orElse(candidate.quote());
-            Fact fact = ComparisonRules.fact(claimId, candidate, supported, originalQuote);
+            Fact fact = ComparisonRules.fact(claimId, candidate, supported, originalQuote, strict);
             facts.add(fact);
             run.claims.add(verified.claim());
             verified.evidences().forEach(e -> run.snapshots.putIfAbsent(e.evidenceId(), e));
         }
         boolean found = facts.stream().anyMatch(Fact::verified);
+        evidenceLog.event(taskId, section, batch, "generation", found ? "completed" : "unverified",
+                selected.size(), List.of(), started);
         return new Cell(source.documentId(), found ? Status.FOUND : Status.UNVERIFIED,
                 facts.stream().allMatch(Fact::verified) ? "" : "部分或全部原文、事实或比较字段未通过核验",
                 List.copyOf(facts));
+    }
+
+    private List<ComparisonCandidate> extractWithRetry(String dimension, ReportConfiguration config,
+                                                       List<RetrievedChunk> selected, Run run) {
+        try {
+            return extractor.extractStrict(dimension, config, selected);
+        } catch (RuntimeException ex) {
+            if (!retryable(ex)) throw ex;
+            run.modelCalls++;
+            return extractor.extractStrict(dimension, config, selected);
+        }
+    }
+
+    private static boolean retryable(Throwable error) {
+        for (Throwable cause = error; cause != null && cause != cause.getCause(); cause = cause.getCause()) {
+            if (cause instanceof ComparisonExtractor.InvalidDraftException
+                    || cause instanceof tools.jackson.core.JacksonException
+                    || cause instanceof java.net.SocketTimeoutException
+                    || cause instanceof java.util.concurrent.TimeoutException
+                    || (cause instanceof java.io.InterruptedIOException && "timeout".equalsIgnoreCase(cause.getMessage()))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean strict(ReportConfiguration configuration) {
+        return configuration.retrieval() != null && configuration.retrieval().strict();
+    }
+
+    private static String comparisonScope(String dimension, ReportConfiguration configuration) {
+        StringBuilder scope = new StringBuilder(dimension);
+        if (configuration.instruction() != null && !configuration.instruction().isBlank()) {
+            scope.append('\n').append(configuration.instruction());
+        }
+        configuration.sections().stream().filter(section -> "matrix".equals(section.sectionId()))
+                .map(ReportConfiguration.Section::instruction).filter(Objects::nonNull)
+                .forEach(instruction -> scope.append('\n').append(instruction));
+        return scope.toString();
     }
 
     private static Cell missing(Source source) {

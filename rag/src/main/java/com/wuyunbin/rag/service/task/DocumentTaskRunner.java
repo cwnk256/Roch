@@ -61,7 +61,9 @@ public class DocumentTaskRunner {
             if (configuration == null) {
                 configuration = ReportTemplates.resolve(new DocumentTaskRequest(task.getType(), task.getDocumentIds(), task.getInstruction()));
             }
-            String promptVersion = task.getType() == DocumentTaskType.COMPARE ? "traceable-report-v2.2" : "traceable-report-v2.1";
+            String promptVersion = configuration.retrieval() != null && configuration.retrieval().strict()
+                    ? "traceable-report-v3.0"
+                    : task.getType() == DocumentTaskType.COMPARE ? "traceable-report-v2.2" : "traceable-report-v2.1";
             GeneratedDocument result = generator.execute(task).withConfiguration(configuration.withGenerationMetadata(
                     chatModel.getOptions().getModel(), promptVersion));
             evidenceValidator.validate(result, new HashSet<>(task.getDocumentIds()));
