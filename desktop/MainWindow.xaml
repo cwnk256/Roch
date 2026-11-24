@@ -1,7 +1,7 @@
 <Window x:Class="Roch.Desktop.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Roch" Width="1180" Height="820" MinWidth="650" MinHeight="450"
+        Title="Roch" Icon="Assets/Roch.ico" Width="1180" Height="820" MinWidth="650" MinHeight="450"
         WindowStartupLocation="CenterScreen" Background="#F2F7F4">
     <Window.Resources>
         <Style TargetType="{x:Type Button}">
