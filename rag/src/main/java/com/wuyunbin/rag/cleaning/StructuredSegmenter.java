@@ -46,14 +46,18 @@ public class StructuredSegmenter {
      * 把全文切分为有序分段。
      */
     public List<TextSegment> segment(String text) {
+        return segment(text, new ArrayList<>());
+    }
+
+    /** 每页独立分段，标题栈由调用方在同一文档内复用。 */
+    List<TextSegment> segment(String text, List<Heading> headingStack) {
         String normalized = text.replace("\r\n", "\n").replace('\r', '\n');
         String[] lines = normalized.split("\n", -1);
 
         List<TextSegment> segments = new ArrayList<>();
         StringBuilder prose = new StringBuilder();
         List<String> pendingRows = new ArrayList<>();
-        List<Heading> headingStack = new ArrayList<>();
-        SectionContext currentSection = SectionContext.EMPTY;
+        SectionContext currentSection = SectionContext.from(headingStack);
 
         for (int i = 0; i < lines.length; i++) {
             String line = lines[i];

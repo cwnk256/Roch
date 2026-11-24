@@ -41,17 +41,18 @@ public class CleaningTextSplitter implements DocumentTransformer {
         return result;
     }
 
-    /** 一份原文的各页共享切片编号，保留各自的来源页码。 */
+    /** 同一原文共享章节上下文和切片编号，每条切片保留当前页的来源页码。 */
     public List<Document> splitPages(List<Document> pages, String pipelineVersion) {
         List<Document> chunks = new ArrayList<>();
+        List<Heading> headingStack = new ArrayList<>();
         for (Document page : pages) {
-            chunks.addAll(split(page, pipelineVersion, chunks.size()));
+            chunks.addAll(split(page, pipelineVersion, chunks.size(), headingStack));
         }
         chunks.forEach(chunk -> chunk.getMetadata().put("chunk_total", chunks.size()));
         return chunks;
     }
 
-    private List<Document> split(Document document, String pipelineVersion, int offset) {
+    private List<Document> split(Document document, String pipelineVersion, int offset, List<Heading> headingStack) {
         String text = document.getText();
         if (text == null || text.isBlank()) {
             return List.of();
@@ -66,7 +67,7 @@ public class CleaningTextSplitter implements DocumentTransformer {
             if (properties.isFilterToc()) {
                 text = tableOfContentsRemover.remove(text);
             }
-            for (TextSegment segment : structuredSegmenter.segment(text)) {
+            for (TextSegment segment : structuredSegmenter.segment(text, headingStack)) {
                 switch (segment.type()) {
                     case PROSE -> {
                         String content = properties.isLowercase()

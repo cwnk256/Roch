@@ -202,7 +202,7 @@ public class DocumentService {
         if (type == null) throw new IllegalArgumentException("不支持的文件类型: " + fileName);
         String version = chunkingProperties.getPipelineVersion();
         if (type.equals("PDF")) {
-            String pdfVersion = version + "-pdf2";
+            String pdfVersion = version + "-pdf3";
             // 保持既有 VARCHAR(32) 约束，同时兼容较长的自定义策略版本。
             version = pdfVersion.length() <= 32 ? pdfVersion
                     : DigestUtils.md5DigestAsHex(pdfVersion.getBytes(StandardCharsets.UTF_8));

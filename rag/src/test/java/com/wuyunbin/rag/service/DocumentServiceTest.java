@@ -179,6 +179,25 @@ class DocumentServiceTest {
     }
 
     @Test
+    void importingPdfWithThePreviousPageIndexVersionRebuildsIt() throws Exception {
+        DocumentService service = spy(serviceWithCounts(0, 1));
+        doAnswer(call -> {
+            String filter = call.getArgument(0);
+            return !filter.contains("chunk_pipeline_version") || filter.contains("legacy-v1-pdf2");
+        }).when(service).hasChunks(anyString());
+        when(pdfDocumentParser.parsePages(any())).thenReturn(List.of(new PdfDocumentParser.PdfPage(1, "PDF body")));
+        when(cleaningTextSplitter.splitPages(anyList(), anyString())).thenReturn(List.of(new Document("replacement")));
+        var pdf = new MockMultipartFile("file", "doc.pdf", "application/pdf", new byte[]{1, 2});
+
+        var response = service.importPdf(pdf);
+
+        assertFalse(response.duplicated());
+        assertEquals(1, response.chunkCount());
+        verify(cleaningTextSplitter).splitPages(anyList(), eq("legacy-v1-pdf3"));
+        verify(cleanupJournal).prepare(anyString(), anyList(), eq(List.of("previous-vector")));
+    }
+
+    @Test
     void postgresWriteFailurePreservesPreviousVectors() {
         DocumentService service = serviceWithCounts(0, 1);
         when(cleaningTextSplitter.apply(anyList())).thenReturn(List.of(new Document("replacement")));
