@@ -18,6 +18,8 @@ final class PdfTableLayout extends PDFTextStripper {
     }
     private record Line(float y, List<Cell> cells) {}
     private static final Pattern VALUE = Pattern.compile("[+−-]?(?:\\d{1,3}(?:,\\d{3})+|\\d+)(?:\\.\\d+)?%?|[-—–]");
+    private static final Pattern SCORE = Pattern.compile("得分|分数|score", Pattern.CASE_INSENSITIVE);
+    private static final Pattern RANK = Pattern.compile("排名|名次|rank", Pattern.CASE_INSENSITIVE);
     private final List<TextPosition> glyphs = new ArrayList<>();
     final Map<Integer,String> pageTexts = new HashMap<>();
     private final StringBuilder nativePage = new StringBuilder();
@@ -125,14 +127,35 @@ final class PdfTableLayout extends PDFTextStripper {
                             : objects.get(c).center() - objects.get(c-1).center();
                     if (!objects.get(c).aligns(values.get(c), separation * .40f)) aligned = false;
                 }
-                if (aligned && (single || grouped)) for (int c=0; c<values.size(); c++) {
-                    String value = values.get(c).text();
-                    if (!value.matches(".*\\d.*")) continue;
-                    String axis = grouped ? axes.get(c/groupWidth).text() : "";
-                                        String column = labels.get(c);
-                    String subject = column.matches("得分|分数|排名|名次|数量|比率|金额|score|rank")
-                            ? label + "的" + axis + column : column + "的" + label + axis;
-                    facts.add(subject + "为" + value);
+                if (aligned && (single || grouped)) {
+                    for (int c = 0; c < values.size(); c++) {
+                        String value = values.get(c).text();
+                        if (!value.matches(".*\\d.*")) continue;
+                        String axis = grouped ? axes.get(c / groupWidth).text() : "";
+                        String column = labels.get(c);
+                        if (RANK.matcher(column).matches()) {
+                            if (value.matches("[1-9]\\d*")) facts.add(label + "的" + axis + "排名第" + value);
+                            continue;
+                        }
+                        String subject = SCORE.matcher(column).matches() || column.matches("数量|比率|金额")
+                                ? label + "的" + axis + column : column + "的" + label + axis;
+                        facts.add(subject + "为" + value);
+                    }
+                    int groupCount = grouped ? axes.size() : 1;
+                    int width = grouped ? groupWidth : labels.size();
+                    for (int group = 0; group < groupCount; group++) {
+                        int start = group * width;
+                        var columns = labels.subList(start, start + width);
+                        int score = uniqueColumn(columns, SCORE);
+                        int rank = uniqueColumn(columns, RANK);
+                        if (score < 0 || rank < 0) continue;
+                        String scoreValue = values.get(start + score).text();
+                        String rankValue = values.get(start + rank).text();
+                        if (scoreValue.matches(".*\\d.*") && rankValue.matches("[1-9]\\d*")) {
+                            String axis = grouped ? axes.get(group).text() : "";
+                            facts.add(label + "的" + axis + columns.get(score) + "为" + scoreValue + "，排名第" + rankValue);
+                        }
+                    }
                 }
             }
             rows.add(new PdfDocumentParser.TableRow(page, caption, row, List.copyOf(facts)));
@@ -142,5 +165,15 @@ final class PdfTableLayout extends PDFTextStripper {
     private static boolean alignedGroup(Cell title, List<Cell> children) {
         float left = children.getFirst().center(), right = children.getLast().center();
         return Math.abs(title.center() - (left + right)/2) < (right-left)/3;
+    }
+
+    private static int uniqueColumn(List<String> labels, Pattern type) {
+        int match = -1;
+        for (int index = 0; index < labels.size(); index++) {
+            if (!type.matcher(labels.get(index)).matches()) continue;
+            if (match >= 0) return -1;
+            match = index;
+        }
+        return match;
     }
 }

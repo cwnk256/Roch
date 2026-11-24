@@ -28,6 +28,14 @@ class PdfDocumentParserTest {
         assertEquals(java.util.List.of("Group A的Delay为17", "Group B的Delay为19"), rows.getFirst().facts());
     }
 
+    @Test void offersScoreAndRankTogetherOnlyWhenTheyShareAnAlignedMetric() throws Exception {
+        var rows = physicalRows(new String[][]{{"Object", "score", "rank"}, {"Alpha", "17.5", "2"}});
+        assertEquals(java.util.List.of("Alpha的score为17.5", "Alpha的排名第2", "Alpha的score为17.5，排名第2"),
+                rows.getFirst().facts());
+        var ambiguous = physicalRows(new String[][]{{"Object", "score", "rank"}, {"Alpha", "17.5", "2.4"}});
+        assertEquals(java.util.List.of("Alpha的score为17.5"), ambiguous.getFirst().facts());
+    }
+
     private static java.util.List<PdfDocumentParser.TableRow> physicalRows(String[][] cells) throws Exception {
         var output = new ByteArrayOutputStream();
         try (var document = new PDDocument()) {
