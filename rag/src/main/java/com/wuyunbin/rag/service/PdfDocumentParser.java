@@ -97,7 +97,8 @@ public class PdfDocumentParser {
         boolean inParagraph = false;
 
         for (LineInfo line : lines) {
-            String text = line.text.strip();
+            // PDF 字体映射可能产生 NUL，PostgreSQL 文本字段无法存储它。
+            String text = line.text.replace("\0", "").strip();
 
             if (text.isEmpty()) {
                 if (inParagraph) {
