@@ -13,7 +13,8 @@ test('comparison reader distinguishes facts on the same page and flags unverifie
             {claimId: 'c2', text: '目标为60天', evidenceIds: ['e2'], supportStatus: 'SUPPORTED'}
         ]}],
         evidenceSnapshots: ['e1', 'e2'].map(evidenceId => ({
-            evidenceId, documentId: 'a b', fileName: 'A.pdf', chunkId: 'chunk', pageStart: 7, section: '附件'
+            evidenceId, documentId: 'a b', fileName: 'A.pdf', chunkId: 'chunk', pageStart: 7, section: '附件',
+            nativeLocation: evidenceId === 'e1' ? '页内位置 16–31' : undefined
         })),
         currentSources: {e1: {originalAvailable: true}, e2: {originalAvailable: false}},
         comparison: {documents: [{documentId: 'a b', fileName: 'A.pdf'}], conclusions: [], rows: [
@@ -27,7 +28,7 @@ test('comparison reader distinguishes facts on the same page and flags unverifie
     try {
         const reader = (await server.ssrLoadModule('/src/components/ReportReader.vue')).default
         const html = await renderToString(createSSRApp({render: () => h(reader, {report})}))
-        for (const fragment of ['换算值：720 小时', '比较字段未核验', '[A.pdf · 第 7 页 · 附件] [1]',
+        for (const fragment of ['换算值：720 小时', '比较字段未核验', '[A.pdf · 第 7 页 · 附件 · 页内位置 16–31] [1]',
             '[A.pdf · 第 7 页 · 附件] [2]', '/api/documents/a%20b/file#page=7', '原文件当前不可用']) {
             assert.ok(html.includes(fragment), fragment)
         }

@@ -15,6 +15,7 @@ import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.core.io.DefaultResourceLoader;
 
 import java.net.SocketTimeoutException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -62,6 +63,48 @@ class LlmSectionGeneratorTest {
                 properties, new ClaimVerifier(chunks, judge));
     }
 
+    @Test void explicitTableReferencesAreBoundToTheNumberedQuestion() {
+        var first = new ClaimVerifier.Citation(1, "A 11", null, "caption", List.of("甲为11"), "表1 原始指标");
+        var second = new ClaimVerifier.Citation(1, "A 12", null, "caption", List.of("甲为12"), "表12 其他指标");
+        var noCaption = new ClaimVerifier.Citation(1, "A 13");
+        var scope = new TableQuestionScope("1. 按表1回答。\n2. 按表12回答。\n3. 给出正文说明。");
+        assertTrue(scope.allows(1, first));
+        assertFalse(scope.allows(1, second));
+        assertFalse(scope.allows(1, noCaption));
+        assertTrue(scope.allows(2, second));
+        assertTrue(scope.allows(3, noCaption));
+        assertFalse(scope.allows(4, first));
+        assertFalse(scope.allows(null, second));
+    }
+    @Test void anchoredBatchResolvesOnlyAnOfferedIdAndDisregardsModelTranscription() throws Exception {
+        var storage = mock(com.wuyunbin.rag.service.storage.DocumentStorage.class);
+        byte[] bytes = SOURCE_TEXT.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        String digest = org.springframework.util.DigestUtils.md5DigestAsHex(bytes);
+        when(storage.load(digest)).thenReturn(Optional.of(new com.wuyunbin.rag.service.storage.DocumentStorage.StoredDocument(
+                digest,"source.txt",bytes)));
+        var chunks = mock(DocumentChunkJpaRepository.class);
+        var row = new DocumentChunkEntity();
+        row.setDocMd5(digest);
+        row.setContent(SOURCE_TEXT);
+        row.setFileName("source.txt");
+        when(chunks.findById("c")).thenReturn(Optional.of(row));
+        var judge = mock(ClaimSupportJudge.class);
+        when(judge.judge(anyString(), anyList())).thenReturn(new ClaimSupportJudge.Judgment(SupportStatus.SUPPORTED,"原文支持。"));
+        var generator = new LlmSectionGenerator(chatClient, new PromptTemplates(new DefaultResourceLoader()),
+                new DocumentTaskProperties(), new ClaimVerifier(chunks, judge, new OriginalPassages(storage,null,null,null)));
+        when(response.content()).thenReturn("""
+                {"claims":[{"question":1,"text":"该设备已经通过审核。","evidenceIds":["S1E1"],"citations":[{"source":1,"quote":"模型伪造"}]},
+                           {"question":2,"text":"负责人已签字。","evidenceIds":["S9E9"]}]}
+                """);
+        var shown = new ArrayList<ClaimVerifier.AnchorSpan>();
+        var result = generator.generateAnchoredBatch(DocumentTaskType.REPORT,PLAN,
+                List.of(new RetrievedChunk("c",digest,"source.txt",SOURCE_TEXT,null,null,null,0,1)),Set.of(digest),"batch",
+                120, shown::addAll);
+        assertEquals(List.of(new ClaimVerifier.AnchorSpan("c", digest, null, null, 0, SOURCE_TEXT.length())), shown);
+        assertEquals(List.of(SupportStatus.SUPPORTED,SupportStatus.INSUFFICIENT),result.claims().stream().map(Claim::supportStatus).toList());
+        assertEquals(SOURCE_TEXT,result.evidences().getFirst().quote());
+        assertTrue(result.evidences().getFirst().nativeLocation().startsWith("原文字符"));
+    }
     @Test
     void invalidCitationsDowngradeOnlyTheirClaimAndQuestionOrderIsRestored() {
         when(response.content()).thenReturn("""

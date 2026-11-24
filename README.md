@@ -271,7 +271,7 @@ server {
 | `rag.document-task.output-dir` | `data/reports` | 结果 JSON 与 PDF 的目录 |
 | `rag.document-task.font-path` | `classpath:fonts/NotoSansSC-Regular.ttf` | 换字体时提供应用可读路径并验证中文导出 |
 | `rag.document-task.max-context-chars` | `24000` | 协调模型上下文长度；它是字符预算，不是 token 数 |
-| `rag.document-task.retrieval.strategy` | `baseline` | 文档任务的新建策略。重启后可选择 `hybrid-only`、`question-split` 或 `full` 做隔离验收；已创建任务重试沿用保存的策略和预算 |
+| `rag.document-task.retrieval.strategy` | `baseline` | 文档任务的新建策略。重启后可选择 `hybrid-only`、`question-split`、`full` 或 `full-v2` 做隔离验收。已创建任务重试沿用保存的策略和预算 |
 | `rag.retrieval.mode` | `vector` | 在 `vector / keyword / hybrid` 间切换并评测 |
 | `rag.retrieval.rrf.k / vector-weight / keyword-weight` | `60 / 1.0 / 1.0` | 混合检索融合参数 |
 | `rag.chat.rag.enabled / top-k / similarity-threshold` | `false / 8 / 0.35` | 问答是否默认检索、召回量与阈值 |
@@ -415,6 +415,7 @@ npm run build
 - `scripts/trace_report_acceptance.py` — 隔离环境的上传、生成、重建和重导出验收。
 - `scripts/trace_report_quality.py` — 按人工标注核对原文定位、事实覆盖和结构化比较结果。
 - `scripts/trace_report_release_gate.py` — 对照四种文档检索策略，按冻结样本和实际入选切片统计覆盖、错误事实、对比判断和延迟。
+- 使用 `run --variant full-v2` 运行带原件证据定位的策略。用 `compare-revisions --before-output <原验收目录> --output <新验收目录>` 对比已保存的 `full` 与 `full-v2`，两次验收使用同一组三轮样本和模型。
 - `rag/src/test/resources/traceability/` — 合成验收资料及标注。
 
 脚本支持 `--help`。在独立 Python 环境中安装质量评估依赖后，可查看参数：

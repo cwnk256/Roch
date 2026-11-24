@@ -64,6 +64,34 @@ public class ExcelDocumentParser {
         }
     }
 
+    public record NativeRow(String sheet, String range, String header, String text) {}
+
+    /** Physical worksheet rows without generated retrieval descriptions. */
+    public java.util.List<NativeRow> nativeRows(InputStream input) throws IOException {
+        try (Workbook workbook = WorkbookFactory.create(input)) {
+            var result = new java.util.ArrayList<NativeRow>();
+            for (Sheet sheet : workbook) {
+                int width = 0;
+                for (Row row : sheet) width = Math.max(width, row.getLastCellNum());
+                String header = null;
+                for (Row row : sheet) {
+                    if (width == 0) continue;
+                    var line = new StringBuilder("|");
+                    for (int col = 0; col < width; col++) {
+                        String value = getCellValueAsString(row.getCell(col)).replace('|', '｜').replace('\n', ' ');
+                        line.append(" ").append(value).append(" |");
+                    }
+                    String text = line.toString();
+                    if (header == null) header = text;
+                    int number = row.getRowNum() + 1;
+                    String last = org.apache.poi.ss.util.CellReference.convertNumToColString(width - 1);
+                    result.add(new NativeRow(sheet.getSheetName(), "A" + number + ":" + last + number, header, text));
+                }
+            }
+            return result;
+        }
+    }
+
     private void renderSheet(Sheet sheet, String sheetName, StringBuilder sb) {
         int lastRow = sheet.getLastRowNum();
         if (lastRow < 0) {

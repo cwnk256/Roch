@@ -17,6 +17,7 @@ import java.net.SocketTimeoutException;
 import java.net.http.HttpTimeoutException;
 import java.util.*;
 import java.util.concurrent.TimeoutException;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 @Component
@@ -57,7 +58,7 @@ public class LlmSectionGenerator implements SectionGenerator {
     public GeneratedSection generate(DocumentTaskType type, ReportSectionPlan plan, List<RetrievedChunk> chunks,
                                      Set<String> allowedDocumentIds) {
         List<RetrievedChunk> selected = selectWithinBudget(chunks, allowedDocumentIds, properties.getMaxContextChars());
-        return generateSection(type, plan, selected, allowedDocumentIds, plan.title(), false);
+        return generateSection(type, plan, selected, allowedDocumentIds, plan.title(), false, null);
     }
 
     @Override
@@ -65,26 +66,36 @@ public class LlmSectionGenerator implements SectionGenerator {
                                            Set<String> allowedDocumentIds, String batchId, boolean strict) {
         // 批次上下文已由执行器分配预算，这里仅沿用来源过滤和切片去重。
         List<RetrievedChunk> selected = selectWithinBudget(chunks, allowedDocumentIds, Integer.MAX_VALUE);
-        return generateSection(type, plan, selected, allowedDocumentIds, batchId, strict);
+        return generateSection(type, plan, selected, allowedDocumentIds, batchId, strict, null);
+    }
+
+    @Override
+    public GeneratedSection generateAnchoredBatch(DocumentTaskType type, ReportSectionPlan plan,
+                                                 List<RetrievedChunk> chunks, Set<String> allowed, String batchId,
+                                                 int budget, Consumer<List<ClaimVerifier.AnchorSpan>> onAnchors) {
+        var selected = selectWithinBudget(chunks, allowed, Integer.MAX_VALUE);
+        var options = verifier.evidenceOptions(selected, plan.title() + "\n" + plan.purpose(), budget);
+        onAnchors.accept(options.spans(selected));
+        return generateSection(type, plan, selected, allowed, batchId, true, options);
     }
 
     private GeneratedSection generateSection(DocumentTaskType type, ReportSectionPlan plan, List<RetrievedChunk> selected,
-                                             Set<String> allowedDocumentIds, String claimNamespace, boolean strict) {
+                                             Set<String> allowedDocumentIds, String claimNamespace, boolean strict, ClaimVerifier.EvidenceOptions options) {
         String prefix = "C-" + ClaimVerifier.hashText(claimNamespace).substring(0, 16) + "-";
         Map<String,Evidence> snapshots = new LinkedHashMap<>();
         List<Claim> claims = new ArrayList<>();
-        if (!selected.isEmpty()) {
+        if (!selected.isEmpty() && (options == null || !options.citations().isEmpty())) {
             StringBuilder context = new StringBuilder();
             for (int i = 0; i < selected.size(); i++) {
                 context.append("\n[资料 ").append(i + 1).append("]\n").append(selected.get(i).content()).append('\n');
             }
-            String template = strict ? "classpath:prompts/document-task-section-strict.txt"
+            String template = options != null ? "classpath:prompts/document-task-section-anchored.txt" : strict ? "classpath:prompts/document-task-section-strict.txt"
                     : "classpath:prompts/document-task-section.txt";
             String prompt = PromptTemplates.render(templates.load(template),
                     Map.of("documentKind", type == DocumentTaskType.REPORT ? "正式报告" : "资料总结",
                             "sectionTitle", plan.title(), "sectionPurpose", Objects.toString(plan.purpose(), ""),
-                            "evidenceContext", context.toString()));
-            SectionDraft draft = strict ? generateStrictDraft(prompt)
+                            "evidenceContext", options == null ? context.toString() : options.prompt()));
+            SectionDraft draft = strict ? generateStrictDraft(prompt, options, options == null ? null : new TableQuestionScope(plan.purpose()))
                     : chatClient.prompt().user(prompt).call().entity(SectionDraft.class);
             if (draft == null) throw new IllegalStateException("章节生成结果为空：" + plan.title());
             for (DraftClaim item : draft.claims() == null ? List.<DraftClaim>of() : draft.claims()) {
@@ -112,12 +123,12 @@ public class LlmSectionGenerator implements SectionGenerator {
         return new GeneratedSection(plan.title(), content, List.copyOf(snapshots.values()), claims);
     }
 
-    private SectionDraft generateStrictDraft(String prompt) {
+    private SectionDraft generateStrictDraft(String prompt, ClaimVerifier.EvidenceOptions options, TableQuestionScope scope) {
         try {
-            return requestStrictDraft(prompt);
+            return requestStrictDraft(prompt, options, scope);
         } catch (BatchFailure first) {
             try {
-                return requestStrictDraft(prompt);
+                return requestStrictDraft(prompt, options, scope);
             } catch (BatchFailure second) {
                 second.addSuppressed(first);
                 throw second;
@@ -125,7 +136,7 @@ public class LlmSectionGenerator implements SectionGenerator {
         }
     }
 
-    private SectionDraft requestStrictDraft(String prompt) {
+    private SectionDraft requestStrictDraft(String prompt, ClaimVerifier.EvidenceOptions options, TableQuestionScope scope) {
         String response;
         try {
             response = chatClient.prompt().user(prompt).call().content();
@@ -157,11 +168,21 @@ public class LlmSectionGenerator implements SectionGenerator {
             if (text == null || text.isBlank()) continue;
             Integer question = positiveInteger(claim.get("question"));
             ordered.add(new OrderedClaim(question == null ? Integer.MAX_VALUE : question,
-                    new DraftClaim(text, readCitations(claim.get("citations")))));
+                    new DraftClaim(text, options == null ? readCitations(claim.get("citations")) : readAnchors(claim.get("evidenceIds"), options, scope, question))));
         }
         if (!claims.isEmpty() && ordered.isEmpty()) throw new BatchFailure(BatchFailureKind.INVALID_RESPONSE, null);
         ordered.sort(Comparator.comparingInt(OrderedClaim::question));
         return new SectionDraft(ordered.stream().map(OrderedClaim::claim).toList(), stringValue(draft.get("unattributedText")));
+    }
+
+    private static List<ClaimVerifier.Citation> readAnchors(JsonNode ids, ClaimVerifier.EvidenceOptions options, TableQuestionScope scope, Integer question) {
+        if (ids == null || !ids.isArray()) return Collections.singletonList(null);
+        var citations = new ArrayList<ClaimVerifier.Citation>();
+        for (JsonNode id : ids) {
+            var candidate = id.isString() ? options.citations().get(id.asString()) : null;
+            citations.add(scope.allows(question, candidate) ? candidate : null);
+        }
+        return citations;
     }
 
     private static List<ClaimVerifier.Citation> readCitations(JsonNode citations) {

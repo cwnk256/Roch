@@ -2,6 +2,7 @@ package com.wuyunbin.rag.service.comparison;
 
 import com.wuyunbin.rag.dto.ReportConfiguration;
 import com.wuyunbin.rag.dto.RetrievedChunk;
+import com.wuyunbin.rag.service.generation.ClaimVerifier.EvidenceOptions;
 import com.wuyunbin.rag.service.generation.PromptTemplates;
 import lombok.RequiredArgsConstructor;
 import org.springframework.ai.chat.client.ChatClient;
@@ -23,6 +24,11 @@ public class ComparisonExtractor {
                     condition, metric, rawValue, unit);
         }
     }
+    public record NumericFact(String evidenceId, String object, String period, String condition,
+                              String metric, String rawValue, String unit) {}
+    public record ObligationFact(String evidenceId, String object, String period, String condition,
+                                 String metric, String obligation) {}
+    public record AtomicExtraction(List<NumericFact> numericFacts, List<ObligationFact> obligationFacts) {}
     static final int MAX_FACTS = 3;
     private final ChatClient chatClient;
     private final PromptTemplates templates;
@@ -47,6 +53,25 @@ public class ComparisonExtractor {
             throw new InvalidDraftException();
         }
         return result.facts().stream().filter(Objects::nonNull).limit(MAX_FACTS).map(DraftFact::candidate).toList();
+    }
+
+    AtomicExtraction extractAnchored(ComparisonCellScope scope, EvidenceOptions evidence) {
+        String types = switch (AnchoredComparisonFacts.type(scope.dimension())) {
+            case NUMERIC -> "只提取数值；obligationFacts 为空。";
+            case OBLIGATION -> "只提取义务；numericFacts 为空。";
+            case ANY -> "按原文事实类型填写各自的数组。";
+        };
+        var result = chatClient.prompt().system(templates.load("classpath:prompts/document-task-compare-anchored.txt"))
+                .user("当前比较维度及适用约束：\n" + scope.prompt() + "\n" + types
+                        + "\n本单元格唯一所用文档的原文锚点：\n" + evidence.prompt())
+                .call().entity(AtomicExtraction.class);
+        if (result == null || result.numericFacts() == null || result.obligationFacts() == null
+                || result.numericFacts().size() + result.obligationFacts().size() > MAX_FACTS
+                || result.numericFacts().stream().anyMatch(Objects::isNull)
+                || result.obligationFacts().stream().anyMatch(Objects::isNull)) {
+            throw new InvalidDraftException();
+        }
+        return result;
     }
 
     static class InvalidDraftException extends IllegalStateException {

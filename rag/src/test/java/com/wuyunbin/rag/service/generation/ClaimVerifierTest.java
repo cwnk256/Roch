@@ -30,6 +30,75 @@ class ClaimVerifierTest {
             parsed.endTask();
         }
     }
+    @Test void offersOnlyOriginalSentencesFromSelectedChunk() throws Exception {
+        var storage = mock(com.wuyunbin.rag.service.storage.DocumentStorage.class);
+        String sentence = "设备 K17 的频率为 50 Hz。";
+        byte[] bytes = sentence.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        String digest = org.springframework.util.DigestUtils.md5DigestAsHex(bytes);
+        when(storage.load(digest)).thenReturn(Optional.of(new com.wuyunbin.rag.service.storage.DocumentStorage.StoredDocument(
+                digest, "source.txt", bytes)));
+        var row = persisted(digest);
+        row.setFileName("source.txt");
+        row.setContent(sentence.toLowerCase(java.util.Locale.ROOT) + "虚构描述。");
+        when(chunks.findById("c")).thenReturn(Optional.of(row));
+        var options = new ClaimVerifier(chunks, judge, new OriginalPassages(storage, null, null, null))
+                .evidenceOptions(List.of(new RetrievedChunk("c",digest,"source.txt",row.getContent(),null,null,null,0,1)));
+        assertEquals(List.of(sentence), options.citations().values().stream().map(ClaimVerifier.Citation::quote).toList());
+        assertFalse(options.prompt().contains("虚构"));
+    }
+
+    @Test void exposesOnlyWorksheetCellsAndPersistsTheirPhysicalRange() throws Exception {
+        var storage = mock(com.wuyunbin.rag.service.storage.DocumentStorage.class);
+        var bytesOut = new java.io.ByteArrayOutputStream();
+        try (var book = new org.apache.poi.xssf.usermodel.XSSFWorkbook()) {
+            var sheet = book.createSheet("采购");
+            var header = sheet.createRow(0);
+            header.createCell(0).setCellValue("设备");
+            header.createCell(1).setCellValue("费用");
+            var data = sheet.createRow(5);
+            data.createCell(0).setCellValue("K17");
+            data.createCell(1).setCellValue(50);
+            book.write(bytesOut);
+        }
+        byte[] bytes = bytesOut.toByteArray();
+        var id = org.springframework.util.DigestUtils.md5DigestAsHex(bytes);
+        when(storage.load(id)).thenReturn(Optional.of(new com.wuyunbin.rag.service.storage.DocumentStorage.StoredDocument(
+                id,"采购.xlsx",bytes)));
+        String content = "| 设备 | 费用 |\n| --- | --- |\n| k17 | 50 |\nK17 的采购费用为 50。";
+        var row = persisted(id);
+        row.setFileName("采购.xlsx");
+        row.setSectionPath("采购");
+        row.setContent(content);
+        when(chunks.findById("c")).thenReturn(Optional.of(row));
+        var parser = new com.wuyunbin.rag.service.ExcelDocumentParser(new com.wuyunbin.rag.service.TableTextEnhancer());
+        var instance = new ClaimVerifier(chunks, judge, new OriginalPassages(storage,null,null,parser));
+        var selected = List.of(new RetrievedChunk("c",id,"采购.xlsx",content,"采购",null,null,0,1));
+        var options = instance.evidenceOptions(selected);
+        assertFalse(options.prompt().contains("采购费用为"));
+        var citation = options.citations().values().stream().filter(c -> c.quote().contains("K17")).findFirst().orElseThrow();
+        var fact = instance.verifyAnchoredComparison("C1", "K17 的费用为 50", citation, selected, Set.of(id), "", true);
+        assertEquals(SupportStatus.SUPPORTED, fact.claim().supportStatus());
+        assertEquals("采购!A6:B6", fact.evidences().getFirst().nativeLocation());
+        assertEquals("| K17 | 50 |", fact.evidences().getFirst().quote());
+        verifyNoInteractions(judge);
+    }
+
+    @Test void rejectsRepeatedNativeParagraphAndTruncatedQualification() {
+        String full = "A设备的校准周期为30天，但仅在试运行时适用。";
+        String truncated = "A设备的校准周期为30天";
+        assertFalse(NativeTextSpan.find(full, truncated).isCompleteClause(full));
+        assertTrue(NativeTextSpan.find(full, full).isCompleteClause(full));
+        assertNull(NativeTextSpan.find(full + "\n" + full, full));
+        var nativeSource = mock(OriginalPassages.class);
+        when(nativeSource.nativeOfficeOrText("d")).thenReturn(full);
+        var row = persisted("d");
+        row.setFileName("source.txt");
+        row.setContent(full);
+        when(chunks.findById("c")).thenReturn(Optional.of(row));
+        var instance = new ClaimVerifier(chunks, judge, nativeSource);
+        var cropped = new RetrievedChunk("c","d","source.txt",truncated,null,null,null,0,1);
+        assertTrue(instance.evidenceOptions(List.of(cropped)).citations().isEmpty());
+    }
     final DocumentChunkJpaRepository chunks = mock(DocumentChunkJpaRepository.class);
     final ClaimSupportJudge judge = mock(ClaimSupportJudge.class);
     final ClaimVerifier verifier = new ClaimVerifier(chunks, judge);

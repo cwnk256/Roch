@@ -10,10 +10,11 @@ public record ReportRetrievalSettings(String strategy, int topK, double threshol
     private static final String HYBRID = "hybrid-only";
     private static final String SPLIT = "question-split";
     private static final String FULL = "full";
+    private static final String ANCHORED = "full-v2";
 
     public ReportRetrievalSettings {
         if (baselineMode == null) baselineMode = RetrievalMode.VECTOR;
-        if (strategy == null || !Set.of(BASELINE, HYBRID, SPLIT, FULL).contains(strategy)) {
+        if (strategy == null || !Set.of(BASELINE, HYBRID, SPLIT, FULL, ANCHORED).contains(strategy)) {
             throw new IllegalArgumentException("未知的文档任务检索策略：" + strategy);
         }
         if (topK < 1 || !Double.isFinite(threshold) || threshold < 0 || threshold > 1
@@ -32,10 +33,14 @@ public record ReportRetrievalSettings(String strategy, int topK, double threshol
     }
 
     public boolean splitQuestions() {
-        return SPLIT.equals(strategy) || FULL.equals(strategy);
+        return SPLIT.equals(strategy) || strict();
     }
 
     public boolean strict() {
-        return FULL.equals(strategy);
+        return FULL.equals(strategy) || anchored();
+    }
+
+    public boolean anchored() {
+        return ANCHORED.equals(strategy);
     }
 }

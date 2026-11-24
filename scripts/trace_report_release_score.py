@@ -9,13 +9,15 @@ import unicodedata
 from collections import Counter
 from xml.etree import ElementTree
 
-from trace_report_release_gate import VARIANTS, load_gold, read_json, save_json, sha256
+from trace_report_release_gate import ANCHORED_VARIANT, VARIANTS, load_gold, read_json, save_json, sha256
 
 
 CORE = {"real": {"full-document"}, "long": {"equipment-report", "agreement-long", "equipment-compare"},
         "expanded": {"maintenance", "procurement", "service", "scope"}}
 GUARDS = {"rejectsWrongRank", "rejectsWrongTableColumn", "rejectsWrongObject", "rejectsWrongUnit",
           "rejectsRecommendationAsRequirement"}
+ANCHOR_GUARDS = {"exposesOnlyWorksheetCellsAndPersistsTheirPhysicalRange",
+                 "anchoredFallbackRejectsOtherDimensionsAndInventedOriginalFields"}
 STABILITY = {"invalidCitationsDowngradeOnlyTheirClaimAndQuestionOrderIsRestored",
              "malformedJsonIsRetriedOnceAndBatchesHaveDistinctClaimIds",
              "persistentTimeoutIsExposedAsABatchFailureAfterOneRetry",
@@ -102,26 +104,31 @@ def read_log(path):
         for line in path.read_text(encoding="utf-8-sig").splitlines():
             if line.strip():
                 record = json.loads(line)
-                if record.get("taskId") and record.get("phase") in ("context", "retrieval", "generation"):
+                if record.get("taskId") and record.get("phase") in ("context", "anchors", "retrieval", "generation"):
                     records.setdefault(record["taskId"], []).append(record)
     return records
 
 
-def context_coverage(facts, records, sources, case=None, split=False):
-    if not records or not any(record["phase"] == "context" for record in records):
+def context_coverage(facts, records, sources, case=None, split=False, phase="context"):
+    if not records or not any(record["phase"] == phase for record in records):
         return None
     contexts = []
     for record in records:
-        if record["phase"] != "context":
+        if record["phase"] != phase:
             continue
         for selected in record["selected"]:
             chunk = sources.chunks.get(selected["chunkId"])
             if not chunk or chunk["documentId"] != selected["documentId"]:
                 raise ValueError(f"Unknown context chunk in {record['taskId']}: {selected['chunkId']}")
-            # Java records the exact prefix length in UTF-16 code units.
-            prefix = chunk["content"].encode("utf-16-le")[:selected["characters"] * 2].decode("utf-16-le")
+            # Index offsets and lengths are expressed in UTF-16 code units.
+            encoded = chunk["content"].encode("utf-16-le")
+            start = selected.get("start", 0) * 2
+            end = start + selected["characters"] * 2
+            if start < 0 or end > len(encoded) or end < start:
+                raise ValueError(f"Invalid context span in {record['taskId']}: {selected['chunkId']}")
+            visible = encoded[start:end].decode("utf-16-le")
             contexts.append((record.get("section"), record.get("batch"), sources.names[chunk["documentId"]],
-                             chunk.get("pageStart"), prefix))
+                             chunk.get("pageStart"), visible))
     found = 0
     for index, fact in enumerate(facts):
         expected_section = None
@@ -215,9 +222,12 @@ def measure(case, directory, sources, log, variant):
     outcome = read_json(outcome_path)
     facts = case["facts"]
     events = log.get(outcome["taskId"], [])
-    context_hits = context_coverage(facts, events, sources, case,
-                                    variant in ("question-split", "full"))
-    result = {**outcome, "contextHits": context_hits, "factsPassed": 0, "factsTotal": len(facts),
+    split = variant in ("question-split", "full", ANCHORED_VARIANT)
+    retrieved_hits = context_coverage(facts, events, sources, case, split)
+    visible_hits = (context_coverage(facts, events, sources, case, split, phase="anchors")
+                    if variant == ANCHORED_VARIANT else retrieved_hits)
+    result = {**outcome, "contextHits": visible_hits, "retrievedHits": retrieved_hits,
+              "factsPassed": 0, "factsTotal": len(facts),
               "decisionsPassed": 0, "decisionsTotal": len(case["decisions"]), "invalidSupported": 0,
               "phaseOutcomes": dict(Counter(f"{event['phase']}/{event['outcome']}" for event in events))}
     if outcome["status"] != "COMPLETED":
@@ -294,6 +304,63 @@ def aggregate(measurements, corpus, cases, field):
         sample = [measurements.get(f"{corpus}/{case}/{repetition}", {}).get(field) for case in cases]
         values.append(None if None in sample else sum(sample))
     return {"runs": values, "median": None if None in values else statistics.median(values)}
+
+
+def compare_revision_runs(before, after, expected, short):
+    before_rows = before["measurements"] if before else {}
+    after_rows = after["measurements"] if after else {}
+    settings = [{k: v for k, v in run["settings"].items() if k != "variant"} for run in (before, after) if run]
+    paired = {key for key in short
+              if before_rows.get(key, {}).get("status") == after_rows.get(key, {}).get("status") == "COMPLETED"
+              and before_rows[key].get("timingReliable", True) and after_rows[key].get("timingReliable", True)}
+    before_p95 = percentile95([before_rows[key]["seconds"] for key in paired])
+    after_p95 = percentile95([after_rows[key]["seconds"] for key in paired])
+    metrics = {}
+    for name, corpus, field in (
+        ("realRecall", "real", "contextHits"), ("realRetrieved", "real", "retrievedHits"),
+        ("realGrounded", "real", "factsPassed"),
+        ("longRecall", "long", "contextHits"), ("longRetrieved", "long", "retrievedHits"),
+        ("longGrounded", "long", "factsPassed"),
+        ("expandedRecall", "expanded", "contextHits"), ("expandedGrounded", "expanded", "factsPassed"),
+        ("expandedDecisions", "expanded", "decisionsPassed"),
+    ):
+        metrics[name] = {
+            "before": aggregate(before_rows, corpus, CORE[corpus], field),
+            "after": aggregate(after_rows, corpus, CORE[corpus], field),
+        }
+    checks = {"sameInputsAndModels": len(settings) == 2 and settings[0] == settings[1],
+              "allSelectedRunsPaired": expected.issubset(before_rows) and expected.issubset(after_rows),
+              "shortTaskP95": paired == short and before_p95 is not None and after_p95 <= before_p95 * 2,
+              "unsupportedClaims": bool(after_rows) and all(not row["invalidSupported"] for row in after_rows.values())}
+    for name, minimum in {"realRecall": 8, "realGrounded": 6, "longRecall": 18,
+                          "longGrounded": 12, "expandedDecisions": 4}.items():
+        median = metrics[name]["after"]["median"]
+        checks[name] = median is not None and median >= minimum
+    return {"checks": checks, "metrics": metrics,
+            "shortTaskP95": {"beforeSeconds": before_p95, "afterSeconds": after_p95,
+                             "matchedSuccessful": len(paired), "expected": len(short)},
+            "before": before, "after": after,
+            "missingBefore": sorted(expected - before_rows.keys()), "missingAfter": sorted(expected - after_rows.keys())}
+
+
+def summarize_revisions(args, corpora):
+    gold = {name: load_gold(source) for name, source in corpora.items()}
+    before = collect_variant(args.before_output, corpora, gold, "full")
+    after = collect_variant(args.output, corpora, gold, ANCHORED_VARIANT)
+    short = {f"expanded/{case['id']}/{rep}" for case in gold["expanded"]["runs"] for rep in range(1, 4)}
+    expected = short | {f"{name}/{case}/{rep}" for name in ("real", "long") for case in CORE[name] for rep in range(1, 4)}
+    result = compare_revision_runs(before, after, expected, short)
+    proof = passing_tests(args.guardrail_proof)
+    result["checks"].update(negativeFixtures=(GUARDS | ANCHOR_GUARDS).issubset(proof),
+                            generationAndRetrievalFailures=STABILITY.issubset(proof),
+                            legacyReadAndReexport=HISTORY.issubset(passing_tests(args.compatibility_proof)))
+    result["passed"] = all(result["checks"].values())
+    save_json(args.output / "revision-comparison.json", result)
+    for name, values in result["metrics"].items():
+        print(f"{name}: {values['before']['median']} -> {values['after']['median']}")
+    for name, passed in result["checks"].items():
+        print(f"{name}: {'PASS' if passed else 'FAIL OR INCOMPLETE'}")
+    return 0 if result["passed"] else 1
 
 
 def summarize(args, corpora):

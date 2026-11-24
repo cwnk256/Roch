@@ -60,7 +60,8 @@ public class ComparisonGenerator {
             }
             rows.add(new Row(dimension, List.copyOf(cells)));
         }
-        List<Conclusion> conclusions = ComparisonRules.conclusions(sources, rows, strict(config));
+        List<Conclusion> conclusions = ComparisonRules.conclusions(sources, rows, strict(config),
+                config.retrieval() != null && config.retrieval().anchored());
         List<GeneratedSection> sections = new ArrayList<>();
         List<Conclusion> published = new ArrayList<>();
         for (var section : config.sections()) {
@@ -89,8 +90,11 @@ public class ComparisonGenerator {
         Set<String> scope = Set.of(source.documentId());
         ReportRetrievalSettings settings = config.retrieval();
         boolean strict = strict(config);
-        String requestedScope = comparisonScope(dimension, config);
+        boolean anchored = settings != null && settings.anchored();
+        var cellScope = anchored ? ComparisonCellScope.from(dimension, config) : null;
+        String requestedScope = anchored ? cellScope.prompt() : comparisonScope(dimension, config);
         List<RetrievedChunk> selected;
+        int budget = settings == null ? Math.min(8000, properties.getMaxContextChars()) : settings.comparisonMaxChars();
         run.retrievalCalls++;
         long started = System.nanoTime();
         try {
@@ -102,15 +106,16 @@ public class ComparisonGenerator {
                     ? taskRetrieval.hybrid(settings.splitQuestions() ? requestedScope : dimension, scope, settings)
                     : retrieval.search(dimension, new RetrievalOptions(selectedLimit, savedThreshold, scope,
                             settings == null ? null : settings.baselineMode()));
-            int budget = settings == null ? Math.min(8000, properties.getMaxContextChars()) : settings.comparisonMaxChars();
             selected = LlmSectionGenerator.selectWithinBudget(hits.stream().limit(selectedLimit).toList(), scope, budget);
             evidenceLog.event(taskId, section, batch, "context", selected.isEmpty() ? "empty" : "selected",
                     hits.size(), selected, started);
         } catch (RuntimeException ex) {
             log.warn("对比检索失败 document={} dimension={}", source.documentId(), dimension, ex);
             evidenceLog.event(taskId, section, batch, "retrieval", "failed", 0, List.of(), started);
-            return new Cell(source.documentId(), Status.RETRIEVAL_FAILED, "检索失败", List.of());
+            return new Cell(source.documentId(), Status.RETRIEVAL_FAILED, "检索失败", List.of(),
+                    anchored ? ReasonCode.RETRIEVAL_FAILED : null);
         }
+        if (anchored) return collectAnchored(taskId, section, batch, source, cellScope, prefix, selected, budget, started, run);
         if (selected.isEmpty()) return missing(source);
 
         List<ComparisonCandidate> candidates;
@@ -154,6 +159,141 @@ public class ComparisonGenerator {
         return new Cell(source.documentId(), found ? Status.FOUND : Status.UNVERIFIED,
                 facts.stream().allMatch(Fact::verified) ? "" : "部分或全部原文、事实或比较字段未通过核验",
                 List.copyOf(facts));
+    }
+
+    private Cell collectAnchored(String taskId, int section, int batch, Source source, ComparisonCellScope scope,
+                                 String prefix, List<RetrievedChunk> selected, int budget, long started, Run run) {
+        if (selected.isEmpty()) {
+            evidenceLog.anchors(taskId, section, batch, List.of(), started);
+            return anchoredCell(source, Status.NOT_FOUND, ReasonCode.NO_ORIGINAL_EVIDENCE, "本次未找到依据");
+        }
+        Map<String, AnchoredComparisonFacts.Selection> candidates = new LinkedHashMap<>();
+        ReasonCode incomplete = null;
+        try {
+            var evidence = verifier.evidenceOptions(selected, scope.dimension(), budget);
+            evidenceLog.anchors(taskId, section, batch, evidence.spans(selected), started);
+            if (evidence.citations().isEmpty())
+                return anchoredCell(source, Status.NOT_FOUND, ReasonCode.NO_ORIGINAL_EVIDENCE, "本次未找到可回查的原文");
+            var inScope = evidence.citations().entrySet().stream()
+                    .filter(entry -> scope.permits(entry.getValue().quote())).toList();
+            if (inScope.isEmpty())
+                return anchoredCell(source, Status.NOT_FOUND, ReasonCode.OUTSIDE_SCOPE, "原文中未找到符合范围的事实");
+            var relevant = inScope.stream().filter(entry -> AnchoredComparisonFacts.possiblyRelevant(
+                    scope.dimension(), entry.getValue().quote())).toList();
+            if (relevant.isEmpty())
+                return anchoredCell(source, Status.NOT_FOUND, ReasonCode.NO_MATCHING_FACT, "本次未找到符合当前维度的依据");
+            List<Map.Entry<String, ClaimVerifier.Citation>> unresolved = new ArrayList<>();
+            for (var entry : relevant) {
+                var literal = AnchoredComparisonFacts.literal(scope, entry.getValue());
+                if (literal == null) unresolved.add(entry);
+                else candidates.putIfAbsent(factKey(literal), literal);
+            }
+            if (!unresolved.isEmpty() && candidates.size() < ComparisonExtractor.MAX_FACTS) {
+                var narrowed = narrowEvidence(unresolved);
+                try {
+                    var draft = extractAnchoredWithRetry(scope, narrowed, run);
+                    var extracted = resolveDraft(scope, narrowed, draft);
+                    if (extracted.size() < draft.numericFacts().size() + draft.obligationFacts().size())
+                        incomplete = ReasonCode.INVALID_FIELD_OR_ANCHOR;
+                    for (var fact : extracted) candidates.putIfAbsent(factKey(fact), fact);
+                } catch (RuntimeException ex) {
+                    log.warn("对比补充事实提取失败 document={} dimension={}", source.documentId(), scope.dimension(), ex);
+                    incomplete = ReasonCode.EXTRACTION_FAILED;
+                }
+            }
+        } catch (RuntimeException ex) {
+            log.warn("对比事实提取失败 document={} dimension={}", source.documentId(), scope.dimension(), ex);
+            evidenceLog.event(taskId, section, batch, "generation", "extraction-failed", selected.size(), List.of(), started);
+            return anchoredCell(source, Status.EXTRACTION_FAILED, ReasonCode.EXTRACTION_FAILED, "未能完成原文事实提取");
+        }
+        if (candidates.isEmpty()) {
+            if (incomplete == ReasonCode.EXTRACTION_FAILED)
+                return anchoredCell(source, Status.EXTRACTION_FAILED, incomplete, "未能完成原文事实提取");
+            if (incomplete == ReasonCode.INVALID_FIELD_OR_ANCHOR)
+                return anchoredCell(source, Status.UNVERIFIED, incomplete, "提取结果在当前维度或原文中无法核实");
+            return anchoredCell(source, Status.NOT_FOUND, ReasonCode.NO_MATCHING_FACT, "本次未找到符合当前维度的依据");
+        }
+
+        List<Fact> facts = new ArrayList<>();
+        for (var selection : candidates.values().stream().limit(ComparisonExtractor.MAX_FACTS).toList()) {
+            var citation = selection.citation();
+            var candidate = selection.candidate();
+            String claimId = prefix + (facts.size() + 1);
+            String requestedScope = scope.verificationScope(selection);
+            var verified = verifier.verifyAnchoredComparison(claimId, candidate.statement(), citation, selected,
+                    Set.of(source.documentId()), requestedScope, selection.literalFieldsProven());
+            if (!requestedScope.isBlank() && verified.evidences().stream().anyMatch(e -> e.sourceStatus() == SourceStatus.MATCHED))
+                run.modelCalls++;
+            var originalQuote = verified.evidences().stream().filter(e -> e.sourceStatus() == SourceStatus.MATCHED)
+                    .map(Evidence::quote).findFirst().orElse(candidate.quote());
+            facts.add(ComparisonRules.fact(claimId, candidate, verified.claim().supportStatus() == SupportStatus.SUPPORTED,
+                    originalQuote, true, true, selection.semanticText()));
+            run.claims.add(verified.claim());
+            verified.evidences().forEach(e -> run.snapshots.putIfAbsent(e.evidenceId(), e));
+        }
+        boolean found = facts.stream().anyMatch(Fact::verified);
+        boolean allVerified = facts.stream().allMatch(Fact::verified);
+        evidenceLog.event(taskId, section, batch, "generation", found ? "completed" : "unverified",
+                selected.size(), List.of(), started);
+        String reason = allVerified ? "" : "部分或全部原文、事实或比较字段未通过核验";
+        if (incomplete == ReasonCode.EXTRACTION_FAILED) reason = "部分原文的事实提取未完成";
+        if (incomplete == ReasonCode.INVALID_FIELD_OR_ANCHOR) reason = "部分提取结果在当前维度或原文中无法核实";
+        return new Cell(source.documentId(), found ? Status.FOUND : Status.UNVERIFIED,
+                reason, List.copyOf(facts), incomplete != null ? incomplete : allVerified ? null : ReasonCode.INSUFFICIENT_SUPPORT);
+    }
+
+    private static String factKey(AnchoredComparisonFacts.Selection selection) {
+        var citation = selection.citation();
+        return Objects.toString(citation.cellLocation(), "") + "\n" + citation.quote() + "\n"
+                + selection.candidate().statement();
+    }
+
+    private ComparisonExtractor.AtomicExtraction extractAnchoredWithRetry(ComparisonCellScope scope,
+                                                                            ClaimVerifier.EvidenceOptions evidence, Run run) {
+        run.modelCalls++;
+        try {
+            return extractor.extractAnchored(scope, evidence);
+        } catch (RuntimeException ex) {
+            if (!retryable(ex)) throw ex;
+            run.modelCalls++;
+            return extractor.extractAnchored(scope, evidence);
+        }
+    }
+
+    private static ClaimVerifier.EvidenceOptions narrowEvidence(List<Map.Entry<String, ClaimVerifier.Citation>> relevant) {
+        Map<String, ClaimVerifier.Citation> byId = new LinkedHashMap<>();
+        StringBuilder prompt = new StringBuilder();
+        for (var entry : relevant) {
+            var citation = entry.getValue();
+            byId.put(entry.getKey(), citation);
+            prompt.append('[').append(entry.getKey()).append("] ");
+            if (citation.cellLocation() != null) prompt.append(citation.cellLocation()).append(' ');
+            prompt.append(Objects.requireNonNullElse(citation.nativeContext(), citation.quote())).append('\n');
+        }
+        return new ClaimVerifier.EvidenceOptions(prompt.toString(), Collections.unmodifiableMap(byId));
+    }
+
+    private static List<AnchoredComparisonFacts.Selection> resolveDraft(ComparisonCellScope scope,
+                                                                         ClaimVerifier.EvidenceOptions evidence,
+                                                                         ComparisonExtractor.AtomicExtraction draft) {
+        List<AnchoredComparisonFacts.Selection> selected = new ArrayList<>();
+        for (var fact : draft.numericFacts()) {
+            var candidate = AnchoredComparisonFacts.draft(scope, evidence.citations().get(fact.evidenceId()),
+                    AnchoredComparisonFacts.Type.NUMERIC, fact.object(), fact.period(), fact.condition(),
+                    fact.metric(), fact.rawValue(), fact.unit());
+            if (candidate != null) selected.add(candidate);
+        }
+        for (var fact : draft.obligationFacts()) {
+            var candidate = AnchoredComparisonFacts.draft(scope, evidence.citations().get(fact.evidenceId()),
+                    AnchoredComparisonFacts.Type.OBLIGATION, fact.object(), fact.period(), fact.condition(),
+                    fact.metric(), fact.obligation(), "");
+            if (candidate != null) selected.add(candidate);
+        }
+        return selected;
+    }
+
+    private static Cell anchoredCell(Source source, Status status, ReasonCode reasonCode, String reason) {
+        return new Cell(source.documentId(), status, reason, List.of(), reasonCode);
     }
 
     private List<ComparisonCandidate> extractWithRetry(String dimension, ReportConfiguration config,

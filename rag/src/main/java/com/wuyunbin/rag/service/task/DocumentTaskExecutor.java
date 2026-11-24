@@ -180,15 +180,30 @@ public class DocumentTaskExecutor {
                 ? TaskEvidenceRetrieval.balance(candidateLists, scope, budget)
                 : LlmSectionGenerator.selectWithinBudget(candidateLists.getFirst().stream().limit(settings.topK()).toList(),
                         scope, budget);
+        if (settings.anchored() && split) {
+            try {
+                var supplement = taskRetrieval.supplement(queries, selected, scope, budget);
+                selected = supplement.selected();
+                candidates += supplement.candidateCount();
+            } catch (RuntimeException ex) {
+                if (Thread.currentThread().isInterrupted()) throw ex;
+                evidenceLog.event(task.getTaskId(), sectionNumber, batchNumber, "retrieval",
+                        "supplement-failed", 0, List.of(), start);
+            }
+        }
         evidenceLog.event(task.getTaskId(), sectionNumber, batchNumber, "context",
                 selected.isEmpty() ? "empty" : "selected", candidates, selected, start);
         if (selected.isEmpty() && split) {
+            if (settings.anchored()) evidenceLog.anchors(task.getTaskId(), sectionNumber, batchNumber, List.of(), start);
             progress.completed++;
             return missingBatch(section, batchId, queries, true, "未检索到可用依据");
         }
         long generationStart = System.nanoTime();
         try {
-            GeneratedSection result = sectionGenerator.generateBatch(task.getType(), section, selected, scope, batchId, settings.strict());
+            GeneratedSection result = settings.anchored()
+                    ? sectionGenerator.generateAnchoredBatch(task.getType(), section, selected, scope, batchId, budget,
+                            spans -> evidenceLog.anchors(task.getTaskId(), sectionNumber, batchNumber, spans, generationStart))
+                    : sectionGenerator.generateBatch(task.getType(), section, selected, scope, batchId, settings.strict());
             progress.completed++;
             evidenceLog.event(task.getTaskId(), sectionNumber, batchNumber, "generation", "completed",
                     candidates, List.of(), generationStart);

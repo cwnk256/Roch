@@ -1,5 +1,6 @@
 package com.wuyunbin.rag.service.comparison;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.wuyunbin.rag.service.generation.model.*;
 import java.util.*;
 
@@ -7,13 +8,31 @@ import java.util.*;
 public record ComparisonResult(List<Source> documents, List<Row> rows, List<Conclusion> conclusions, Metrics metrics) {
     public record Source(String documentId, String fileName) {}
     public record Row(String dimension, List<Cell> cells) {}
-    public record Cell(String documentId, Status status, String reason, List<Fact> facts) {}
+    public record Cell(String documentId, Status status, String reason, List<Fact> facts,
+                       @JsonInclude(JsonInclude.Include.NON_NULL) ReasonCode reasonCode) {
+        public Cell(String documentId, Status status, String reason, List<Fact> facts) {
+            this(documentId, status, reason, facts, null);
+        }
+    }
     public enum Status { FOUND, NOT_FOUND, RETRIEVAL_FAILED, EXTRACTION_FAILED, UNVERIFIED }
     public record Fact(String claimId, String object, String period, String condition, String metric,
                        String rawValue, String unit, String normalizedValue, String normalizedUnit,
                        boolean verified, boolean fixed, boolean textual, String modality, String quote) {}
-    public record Conclusion(Kind kind, String dimension, String text, List<String> claimIds) {}
+    public record Conclusion(Kind kind, String dimension, String text, List<String> claimIds,
+                             @JsonInclude(JsonInclude.Include.NON_NULL) ReasonCode reasonCode) {
+        public Conclusion(Kind kind, String dimension, String text, List<String> claimIds) {
+            this(kind, dimension, text, claimIds, null);
+        }
+    }
     public enum Kind { COMMON, DIFFERENT, KEY_DATA, POSSIBLE_CONFLICT, INCOMPARABLE }
+    public enum ReasonCode {
+        RETRIEVAL_FAILED, NO_ORIGINAL_EVIDENCE, NO_MATCHING_FACT, OUTSIDE_SCOPE, EXTRACTION_FAILED,
+        INVALID_FIELD_OR_ANCHOR, INSUFFICIENT_SUPPORT, VERIFIED_VALUE,
+        OBJECT_MISSING, OBJECT_MISMATCH, METRIC_MISMATCH, PERIOD_MISMATCH, PERIOD_MISSING,
+        CONDITION_MISMATCH, CONDITION_MISSING, TYPE_MISMATCH, INCOMPATIBLE_UNIT,
+        EQUIVALENT_VALUE, EQUIVALENT_OBLIGATION, OPPOSITE_OBLIGATION, OBLIGATION_DIFFERENCE,
+        FIXED_VALUE_CONFLICT, DISJOINT_BOUNDS, VALUE_OR_LIMIT_DIFFERENCE
+    }
     public record Metrics(int retrievalCalls, int modelCalls, long elapsedMillis) {}
 
     public void validate(List<GeneratedSection> sections, Map<String, Evidence> snapshots, Set<String> allowed) {

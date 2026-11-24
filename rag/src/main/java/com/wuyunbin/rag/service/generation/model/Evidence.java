@@ -32,8 +32,16 @@ public record Evidence(
         String pipelineVersion,
         String textHash,
         Integer chunkIndex,
-        String attemptedQuote
+        String attemptedQuote,
+        String nativeLocation
 ) {
+    public Evidence(String documentId, String fileName, String chunkId, String section, Integer pageStart,
+                    Integer pageEnd, double score, String evidenceId, String quote, SourceStatus sourceStatus,
+                    String pipelineVersion, String textHash, Integer chunkIndex, String attemptedQuote) {
+        this(documentId, fileName, chunkId, section, pageStart, pageEnd, score, evidenceId, quote, sourceStatus,
+                pipelineVersion, textHash, chunkIndex, attemptedQuote, null);
+    }
+
     public Evidence(String documentId, String fileName, String chunkId, String section, Integer pageStart,
                     Integer pageEnd, double score) {
         this(documentId, fileName, chunkId, section, pageStart, pageEnd, score, null, null, null, null,

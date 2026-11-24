@@ -2,6 +2,7 @@ package com.wuyunbin.rag.service.task;
 
 import com.wuyunbin.rag.dto.RetrievedChunk;
 import com.wuyunbin.rag.retrieval.RetrievalLogProperties;
+import com.wuyunbin.rag.service.generation.ClaimVerifier;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.slf4j.LoggerFactory;
@@ -23,9 +24,21 @@ public class TaskEvidenceLog {
     public void event(String taskId, int section, int batch, String phase, String outcome,
                       int candidateCount, List<RetrievedChunk> selected, long startNanos) {
         if (!properties.isLogEnabled()) return;
+        var passages = selected.stream().map(chunk -> new Passage(chunk.chunkId(), chunk.documentId(),
+                chunk.pageStart(), chunk.pageEnd(), chunk.content().length(), null)).toList();
+        write(taskId, section, batch, phase, outcome, candidateCount, passages, startNanos);
+    }
+
+    public void anchors(String taskId, int section, int batch, List<ClaimVerifier.AnchorSpan> spans, long startNanos) {
+        if (!properties.isLogEnabled()) return;
+        var passages = spans.stream().map(span -> new Passage(span.chunkId(), span.documentId(),
+                span.pageStart(), span.pageEnd(), span.characters(), span.start())).toList();
+        write(taskId, section, batch, "anchors", spans.isEmpty() ? "empty" : "available", spans.size(), passages, startNanos);
+    }
+
+    private void write(String taskId, int section, int batch, String phase, String outcome,
+                       int candidateCount, List<Passage> passages, long startNanos) {
         try {
-            var passages = selected.stream().map(chunk -> new Passage(chunk.chunkId(), chunk.documentId(),
-                    chunk.pageStart(), chunk.pageEnd(), chunk.content().length())).toList();
             AUDIT.info(mapper.writeValueAsString(new Event(taskId, section, batch, phase, outcome,
                     candidateCount, passages, TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos))));
         } catch (RuntimeException ex) {
@@ -35,5 +48,7 @@ public class TaskEvidenceLog {
 
     private record Event(String taskId, int section, int batch, String phase, String outcome,
                          int candidateCount, List<Passage> selected, long elapsedMillis) {}
-    private record Passage(String chunkId, String documentId, Integer pageStart, Integer pageEnd, int characters) {}
+    private record Passage(String chunkId, String documentId, Integer pageStart, Integer pageEnd, int characters,
+                           @com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL)
+                           Integer start) {}
 }

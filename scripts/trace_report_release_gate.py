@@ -25,6 +25,7 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 
 ROOT = Path(__file__).resolve().parents[1]
 VARIANTS = ("baseline", "hybrid-only", "question-split", "full")
+ANCHORED_VARIANT = "full-v2"
 CORPORA = {
     "expanded": ROOT / "logs/model-benchmark-20261124-163206",
     "long": ROOT / "logs/long-benchmark-20261124-164748",
@@ -84,18 +85,21 @@ def load_gold(corpus):
     return read_json(gold_path)
 
 
-def upload(api, path, digest):
+def load_indexed_document(api, path, digest, reuse_index=False):
     binary = path.read_bytes()
     if sha256(binary) != digest:
         raise ValueError(f"Frozen fixture failed its hash check: {path.name}")
-    boundary = uuid.uuid4().hex
-    media = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-    header = (f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="{path.name}"\r\n'
-              f"Content-Type: {media}\r\n\r\n")
-    body = header.encode() + binary + f"\r\n--{boundary}--\r\n".encode()
-    result = api.json("/documents" + ENDPOINTS[path.suffix], "POST", body, f"multipart/form-data; boundary={boundary}")
-    document_id = result["md5"]
-    if document_id != hashlib.md5(binary).hexdigest() or api.transfer(f"/documents/{document_id}/file") != binary:
+    document_id = hashlib.md5(binary).hexdigest()
+    if not reuse_index:
+        boundary = uuid.uuid4().hex
+        media = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        header = (f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="{path.name}"\r\n'
+                  f"Content-Type: {media}\r\n\r\n")
+        body = header.encode() + binary + f"\r\n--{boundary}--\r\n".encode()
+        result = api.json("/documents" + ENDPOINTS[path.suffix], "POST", body, f"multipart/form-data; boundary={boundary}")
+        if document_id != result["md5"]:
+            raise ValueError(f"Indexed document ID does not match fixture: {path.name}")
+    if api.transfer(f"/documents/{document_id}/file") != binary:
         raise ValueError(f"Original round trip does not match fixture: {path.name}")
     chunks = []
     while True:
@@ -223,7 +227,8 @@ def run(args, corpora):
         documents = read_json(registry) if registry.exists() else {}
         required = {document for case in cases for document in case["documents"]}
         for document in sorted(required):
-            documents[document] = upload(api, corpora[name] / "fixtures" / document, gold["sha256"][document])
+            documents[document] = load_indexed_document(api, corpora[name] / "fixtures" / document,
+                                                        gold["sha256"][document], args.reuse_index)
         save_json(registry, documents)
         for repetition in range(1, args.repetitions + 1):
             for case in cases:
@@ -251,7 +256,7 @@ def main():
     common.add_argument("--corpus", action="append", default=[], metavar="NAME=DIR")
     commands = parser.add_subparsers(dest="action", required=True)
     runner = commands.add_parser("run", parents=[common])
-    runner.add_argument("--variant", choices=VARIANTS, required=True)
+    runner.add_argument("--variant", choices=(*VARIANTS, ANCHORED_VARIANT), required=True)
     runner.add_argument("--api", required=True)
     runner.add_argument("--model-api", default="http://127.0.0.1:1234/v1")
     runner.add_argument("--model", default="google/gemma-4-e4b")
@@ -260,15 +265,23 @@ def main():
     runner.add_argument("--timeout", type=int, default=1800)
     runner.add_argument("--cases", nargs="+")
     runner.add_argument("--retrieval-log", type=Path)
+    runner.add_argument("--reuse-index", action="store_true", help="Read the archived originals and chunks without uploading")
     judge = commands.add_parser("summary", parents=[common])
     judge.add_argument("--guardrail-proof", type=Path, help="Surefire XML with the required negative cases")
     judge.add_argument("--compatibility-proof", type=Path, help="Surefire XML for legacy read/re-export")
+    revisions = commands.add_parser("compare-revisions", parents=[common])
+    revisions.add_argument("--before-output", type=Path, required=True)
+    revisions.add_argument("--guardrail-proof", type=Path)
+    revisions.add_argument("--compatibility-proof", type=Path)
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     corpora = parse_corpora(args.corpus)
     if args.action == "run":
         run(args, corpora)
         return 0
+    if args.action == "compare-revisions":
+        from trace_report_release_score import summarize_revisions
+        return summarize_revisions(args, corpora)
     from trace_report_release_score import summarize
     return summarize(args, corpora)
 

@@ -37,6 +37,7 @@ export interface Evidence {
     attemptedQuote?: string
     sourceStatus?: string
     chunkIndex?: number
+    nativeLocation?: string
 }
 
 export interface Claim {
@@ -104,6 +105,8 @@ export function locationOf(source: Evidence) {
         parts.push(`第 ${pages} 页`)
     }
     if (source.section?.trim()) parts.push(source.section)
+    const nativeLocation = source.nativeLocation?.trim()
+    if (nativeLocation && nativeLocation !== source.section?.trim()) parts.push(nativeLocation)
     if (!parts.length && source.chunkIndex != null) parts.push(`切片 ${source.chunkIndex + 1}`)
     return parts.join(' · ') || '位置未记录'
 }

@@ -16,6 +16,38 @@ import java.nio.charset.StandardCharsets;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class PdfDocumentParserTest {
+    @Test void rejectsRepeatedColumnsWithoutAnExplicitGroupAxis() throws Exception {
+        var rows = physicalRows(new String[][]{{"Metric","Group","Group"},{"Delay","17","19"}});
+        assertEquals(1, rows.size());
+        assertEquals(java.util.List.of(), rows.getFirst().facts());
+    }
+
+    @Test void bindsPhysicalRowsToUniqueColumnHeaders() throws Exception {
+        var rows = physicalRows(new String[][]{{"Metric", "Group A", "Group B"}, {"Delay", "17", "19"}});
+        assertEquals(1, rows.size());
+        assertEquals(java.util.List.of("Group A的Delay为17", "Group B的Delay为19"), rows.getFirst().facts());
+    }
+
+    private static java.util.List<PdfDocumentParser.TableRow> physicalRows(String[][] cells) throws Exception {
+        var output = new ByteArrayOutputStream();
+        try (var document = new PDDocument()) {
+            var page = new PDPage();
+            document.addPage(page);
+            try (var content = new PDPageContentStream(document, page)) {
+
+                for (int row=0; row<cells.length; row++) for (int col=0; col<cells[row].length; col++) {
+                    content.beginText();
+                    content.setFont(new PDType1Font(Standard14Fonts.FontName.HELVETICA), 12);
+                    content.newLineAtOffset(60 + col * 100, 700 - row * 16);
+                    content.showText(cells[row][col]);
+                    content.endText();
+                }
+            }
+            document.save(output);
+        }
+        return new PdfDocumentParser(new TableTextEnhancer()).physicalTableRows(new ByteArrayInputStream(output.toByteArray()));
+    }
+
     @Test
     void removesNullCharacterIntroducedByThePdfFontMapping() throws Exception {
         var output = new ByteArrayOutputStream();

@@ -19,10 +19,14 @@ class ComparisonRulesTest {
     }
 
     private Conclusion compare(Fact left, Fact right, boolean strict) {
+        return compare(left, right, strict, false);
+    }
+
+    private Conclusion compare(Fact left, Fact right, boolean strict, boolean anchored) {
         Row row = new Row("比较", List.of(new Cell("A", Status.FOUND, "", List.of(left)),
                 new Cell("B", Status.FOUND, "", List.of(right)),
                 new Cell("C", Status.NOT_FOUND, "本次未找到依据", List.of())));
-        return ComparisonRules.conclusions(sources, List.of(row), strict).stream()
+        return ComparisonRules.conclusions(sources, List.of(row), strict, anchored).stream()
                 .filter(c -> c.claimIds().size() > 1).findFirst().orElseThrow();
     }
 
@@ -80,6 +84,20 @@ class ComparisonRulesTest {
         assertEquals(Kind.DIFFERENT, compare(upper, lower).kind());
         Fact upperAlias = fact("b", "设备甲", "", "常温", "校准", "20", "天", "设备甲常温校准间隔至多20天。");
         assertEquals(Kind.COMMON, compare(upper, upperAlias).kind());
+    }
+
+    @Test void anchoredLinkWordsKeepOpposingBoundsDistinct() {
+        for (var bounds : List.of(List.of("最高", "最低"), List.of("不大于", "不小于"))) {
+            String upper = "在工作日，北湖园区的故障到场时限" + bounds.getFirst() + " 6 小时。";
+            String lower = "在工作日，北湖园区的故障到场时限" + bounds.getLast() + " 6 小时。";
+            Fact a = ComparisonRules.fact("a", new ComparisonCandidate(1, upper, "北湖园区", "", "工作日",
+                    "故障到场时限", "6", "小时"), true, upper, true, true);
+            Fact b = ComparisonRules.fact("b", new ComparisonCandidate(1, lower, "北湖园区", "", "工作日",
+                    "故障到场时限", "6", "小时"), true, lower, true, true);
+
+            assertEquals(Kind.DIFFERENT, compare(a, b, true, true).kind());
+            assertEquals(ReasonCode.VALUE_OR_LIMIT_DIFFERENCE, compare(a, b, true, true).reasonCode());
+        }
     }
 
     @Test void matchingValueFragmentsDoNotOverrideDifferentQualifiedActions() {

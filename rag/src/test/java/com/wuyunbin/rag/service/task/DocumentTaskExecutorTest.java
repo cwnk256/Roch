@@ -42,6 +42,7 @@ class DocumentTaskExecutorTest {
     private DocumentService documentService;
     private DocumentTaskExecutor executor;
     private TaskEvidenceRetrieval taskRetrieval;
+    private TaskEvidenceLog evidenceLog;
 
     @BeforeEach
     @SuppressWarnings("unchecked")
@@ -55,11 +56,12 @@ class DocumentTaskExecutorTest {
         // 组装器使用真实实现，连带验证章节保序 + Evidence 去重
         GeneratedDocumentAssembler assembler = new GeneratedDocumentAssembler();
         taskRetrieval = mock(TaskEvidenceRetrieval.class);
+        evidenceLog = mock(TaskEvidenceLog.class);
 
         executor = new DocumentTaskExecutor(
                 documentRetriever, chunkRetriever, outlineGenerator,
                 sectionGenerator, summaryGenerator, assembler, documentService, mock(ComparisonGenerator.class),
-                taskRetrieval, mock(TaskEvidenceLog.class), new DocumentTaskProperties());
+                taskRetrieval, evidenceLog, new DocumentTaskProperties());
         ReflectionTestUtils.setField(executor, "defaultTopK", 8);
         ReflectionTestUtils.setField(executor, "defaultThreshold", 0.5);
     }
@@ -222,6 +224,37 @@ class DocumentTaskExecutorTest {
         assertTrue(section.content().contains("已处理"));
         assertTrue(section.content().contains("范围（本批次生成失败）"));
         verify(taskRetrieval, times(5)).hybrid(anyString(), eq(SELECTED), eq(settings));
+        verifyNoMoreInteractions(taskRetrieval);
         verifyNoInteractions(chunkRetriever);
+    }
+
+    @Test
+    void anchoredStrategyGeneratesAndLogsTheActualSupplementedBatch() {
+        DocumentTask task = runningTask();
+        var settings = new ReportRetrievalSettings("full-v2", 8, 0.35, 120, 40);
+        String question = "维护周期是多少？";
+        task.setConfiguration(new ReportConfiguration("ANALYSIS", "1", "报告",
+                List.of(new ReportConfiguration.Section("findings", "事实", true, "保留条件。")),
+                "1. " + question, null, List.of(), null, null).withRetrieval(settings));
+        var original = chunk("original", "docA", "a.pdf", 1, 1, 0.9);
+        var added = chunk("added", "docA", "a.pdf", 2, 2, 0.0);
+        var selected = List.of(original, added);
+        var section = new GeneratedSection("事实", "已处理", List.of());
+        when(taskRetrieval.hybrid(question, SELECTED, settings)).thenReturn(List.of(original));
+        when(taskRetrieval.supplement(List.of(question), List.of(original), SELECTED, 120))
+                .thenReturn(new TaskEvidenceRetrieval.Supplement(selected, 3));
+        when(sectionGenerator.generateBatch(any(), any(), anyList(), eq(SELECTED), eq("C-1-1-"), eq(true)))
+                .thenReturn(section);
+        when(sectionGenerator.generateAnchoredBatch(any(), any(), eq(selected), eq(SELECTED), eq("C-1-1-"), eq(120), any()))
+                .thenReturn(section);
+        when(summaryGenerator.generateSummary(anyString(), anyString(), anyList()))
+                .thenReturn(new VerifiedSummary("摘要", List.of(), List.of()));
+
+        assertEquals("已处理", executor.execute(task).sections().getFirst().content());
+        verify(sectionGenerator).generateAnchoredBatch(eq(DocumentTaskType.REPORT), any(), eq(selected),
+                eq(SELECTED), eq("C-1-1-"), eq(120), any());
+        verify(sectionGenerator, never()).generateBatch(any(), any(), any(), any(), any(), anyBoolean());
+        verify(evidenceLog).event(eq(task.getTaskId()), eq(1), eq(1), eq("context"), eq("selected"),
+                eq(4), eq(selected), anyLong());
     }
 }

@@ -12,6 +12,20 @@ public interface DocumentChunkJpaRepository extends JpaRepository<DocumentChunkE
 
     List<DocumentChunkEntity> findByDocMd5(String docMd5);
 
+    List<DocumentChunkEntity> findTop4ByDocMd5AndPageStartAndChunkIndexOrderByChunkIdAsc(
+            String docMd5, Integer pageStart, Integer chunkIndex);
+
+    @Query(value = """
+            SELECT * FROM document_chunks
+            WHERE doc_md5 IN :docIds AND page_start > 0
+              AND to_tsvector('simple', tokens) @@ to_tsquery('simple', :query)
+            ORDER BY ts_rank(to_tsvector('simple', tokens), to_tsquery('simple', :query)) DESC,
+                     doc_md5, page_start, chunk_index, chunk_id
+            LIMIT :limit
+            """, nativeQuery = true)
+    List<DocumentChunkEntity> searchReportAnchors(
+            @Param("query") String query, @Param("docIds") Collection<String> docIds, @Param("limit") int limit);
+
     @Modifying
     @Query("DELETE FROM DocumentChunkEntity c WHERE c.docMd5 = :docMd5")
     void deleteByDocMd5(@Param("docMd5") String docMd5);

@@ -56,6 +56,22 @@ public class PdfDocumentParser {
         return String.join("\n\n", parsePages(inputStream).stream().map(PdfPage::content).toList());
     }
 
+    public record TableRow(int page, String caption, String row, List<String> facts) {}
+
+    public record NativeLayout(Map<Integer,String> pages, List<TableRow> rows) {}
+
+    public List<TableRow> physicalTableRows(InputStream input) throws IOException {
+        return nativeLayout(input).rows();
+    }
+
+    public NativeLayout nativeLayout(InputStream input) throws IOException {
+        try (PDDocument document = Loader.loadPDF(input.readAllBytes())) {
+            var layout = new PdfTableLayout();
+            layout.getText(document);
+            return new NativeLayout(Map.copyOf(layout.pageTexts), List.copyOf(layout.rows));
+        }
+    }
+
     public record PdfPage(int number, String content) {}
 
     public List<PdfPage> parsePages(InputStream inputStream) throws IOException {

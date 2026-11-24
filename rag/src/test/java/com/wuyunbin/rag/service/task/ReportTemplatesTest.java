@@ -82,6 +82,17 @@ class ReportTemplatesTest {
     }
 
     @Test
+    void snapshotsTheNewStrategyAsItsOwnVersion() {
+        var properties = new DocumentTaskProperties();
+        properties.setRetrievalStrategy("full-v2");
+        var settings = properties.snapshotRetrieval();
+
+        assertEquals("full-v2", settings.strategy());
+        assertTrue(settings.splitQuestions());
+        assertTrue(settings.strict());
+    }
+
+    @Test
     void rejectsOtherTaskTemplatesAndUnavailableVersions() {
         for (var request : List.of(
                 new DocumentTaskRequest(DocumentTaskType.SUMMARY, List.of("a"), "生成", "ANALYSIS", "1", null, null, null),
