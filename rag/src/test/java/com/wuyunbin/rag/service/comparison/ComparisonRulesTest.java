@@ -15,10 +15,14 @@ class ComparisonRulesTest {
     }
 
     private Conclusion compare(Fact left, Fact right) {
+        return compare(left, right, false);
+    }
+
+    private Conclusion compare(Fact left, Fact right, boolean strict) {
         Row row = new Row("比较", List.of(new Cell("A", Status.FOUND, "", List.of(left)),
                 new Cell("B", Status.FOUND, "", List.of(right)),
                 new Cell("C", Status.NOT_FOUND, "本次未找到依据", List.of())));
-        return ComparisonRules.conclusions(sources, List.of(row)).stream()
+        return ComparisonRules.conclusions(sources, List.of(row), strict).stream()
                 .filter(c -> c.claimIds().size() > 1).findFirst().orElseThrow();
     }
 
@@ -92,5 +96,15 @@ class ComparisonRulesTest {
         assertEquals(Kind.INCOMPARABLE, compare(lower, otherCondition).kind());
         Fact recommendation = fact("b", "设备甲", "", "常温", "校准", "5", "天", "常温下设备甲校准周期建议至多5天。");
         assertEquals(Kind.DIFFERENT, compare(lower, recommendation).kind());
+    }
+
+    @Test void alignsMetricSuffixEquipmentCaseAndSameDurationUnits() {
+        String hoursSource = "K17设备响应耗时为3小时。";
+        String minutesSource = "k17设备响应耗时为180分钟。";
+        Fact hours = ComparisonRules.fact("a", new ComparisonCandidate(1, hoursSource, "k17设备", "",
+                "", "响应耗时为3小时", "3", "小时"), true, hoursSource, true);
+        Fact minutes = ComparisonRules.fact("b", new ComparisonCandidate(1, minutesSource, "K17设备", "",
+                "", "响应耗时", "180", "分钟"), true, minutesSource, true);
+        assertEquals(Kind.COMMON, compare(hours, minutes, true).kind());
     }
 }

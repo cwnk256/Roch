@@ -28,23 +28,23 @@ public class OriginalPassages {
     public void beginTask() { taskSources.set(new HashMap<>()); }
     public void endTask() { taskSources.remove(); }
 
-    record Match(boolean available, String quote) {}
+    record Match(boolean available, String quote, String context) {}
 
     Match find(String id, Integer page, Pattern expression) {
         var cache = taskSources.get();
         Map<Integer, String> pages = cache == null ? parse(id) : cache.computeIfAbsent(id, this::parse);
-        if (pages.isEmpty()) return new Match(false, null);
+        if (pages.isEmpty()) return new Match(false, null, null);
         // Plain text and Office extracts use key zero. A missing PDF page cannot match another page.
         String source = pages.containsKey(0) ? pages.get(0) : page == null ? null : pages.get(page);
-        if (source == null) return new Match(true, null);
+        if (source == null) return new Match(true, null, null);
         var matcher = expression.matcher(source);
         String unique = null;
         while (matcher.find()) {
             String found = matcher.group();
             if (unique == null) unique = found;
-            else if (!unique.equals(found)) return new Match(true, null);
+            else if (!unique.equals(found)) return new Match(true, null, null);
         }
-        return new Match(true, unique);
+        return new Match(true, unique, unique == null ? null : source);
     }
 
     private Map<Integer, String> parse(String id) {

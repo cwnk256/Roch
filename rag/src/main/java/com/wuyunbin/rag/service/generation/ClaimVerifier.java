@@ -18,7 +18,7 @@ import java.util.regex.Pattern;
 public class ClaimVerifier {
     public record Citation(int source, String quote) {}
     public record VerifiedClaim(Claim claim, List<Evidence> evidences) {}
-    private record Located(Evidence evidence, String context) {}
+    private record Located(Evidence evidence, String context, String originalContext) {}
 
     private static final Pattern WHITESPACE = Pattern.compile("\\s+", Pattern.UNICODE_CHARACTER_CLASS);
     private final DocumentChunkJpaRepository chunks;
@@ -38,8 +38,26 @@ public class ClaimVerifier {
 
     public VerifiedClaim verify(String claimId, String text, List<Citation> citations,
                                 List<RetrievedChunk> selected, Set<String> allowedDocumentIds) {
+        return verify(claimId, text, citations, selected, allowedDocumentIds, false, null);
+    }
+
+    public VerifiedClaim verifyStrict(String claimId, String text, List<Citation> citations,
+                                      List<RetrievedChunk> selected, Set<String> allowedDocumentIds) {
+        return verify(claimId, text, citations, selected, allowedDocumentIds, true, null);
+    }
+
+    public VerifiedClaim verifyStrict(String claimId, String text, List<Citation> citations,
+                                      List<RetrievedChunk> selected, Set<String> allowedDocumentIds,
+                                      String requestedScope) {
+        return verify(claimId, text, citations, selected, allowedDocumentIds, true, requestedScope);
+    }
+
+    private VerifiedClaim verify(String claimId, String text, List<Citation> citations,
+                                 List<RetrievedChunk> selected, Set<String> allowedDocumentIds,
+                                 boolean strict, String requestedScope) {
         Map<String, Evidence> evidence = new LinkedHashMap<>();
         List<ClaimSupportJudge.Passage> passages = new ArrayList<>();
+        List<StructuredEvidence.Passage> structured = new ArrayList<>();
         String failure = "陈述没有引用。";
         boolean invalid = false;
         for (Citation citation : citations == null ? List.<Citation>of() : citations) {
@@ -60,6 +78,8 @@ public class ClaimVerifier {
             if (evidence.putIfAbsent(snapshot.evidenceId(), snapshot) != null) continue;
             if (snapshot.sourceStatus() == SourceStatus.MATCHED) {
                 passages.add(new ClaimSupportJudge.Passage(snapshot.quote(), located.context()));
+                if (strict) structured.add(new StructuredEvidence.Passage(snapshot.quote(), located.context(),
+                        located.originalContext()));
             } else {
                 invalid = true;
                 failure = snapshot.sourceStatus() == SourceStatus.QUOTE_MISMATCH
@@ -69,9 +89,17 @@ public class ClaimVerifier {
         ClaimSupportJudge.Judgment decision = new ClaimSupportJudge.Judgment(SupportStatus.INSUFFICIENT, failure);
         if (!invalid && !passages.isEmpty()) {
             try {
-                var result = judge.judge(text, List.copyOf(passages));
+                var result = strict && requestedScope != null && !requestedScope.isBlank()
+                        ? judge.judgeInScope(text, List.copyOf(passages), requestedScope)
+                        : judge.judge(text, List.copyOf(passages));
                 decision = result != null && result.status() != null && result.reason() != null && !result.reason().isBlank()
                         ? result : unavailableJudgment();
+                if (strict && decision.status() == SupportStatus.SUPPORTED) {
+                    String insufficient = StructuredEvidence.insufficiency(text, structured);
+                    if (insufficient != null) {
+                        decision = new ClaimSupportJudge.Judgment(SupportStatus.INSUFFICIENT, insufficient);
+                    }
+                }
             } catch (RuntimeException ex) {
                 log.warn("内容支持判断失败 claimId={}", claimId, ex);
                 decision = unavailableJudgment();
@@ -95,6 +123,7 @@ public class ClaimVerifier {
         boolean available = row != null && row.getContent() != null;
         String hash = available ? hashText(row.getContent()) : null;
         String quote = null;
+        String originalContext = null;
         if (available && proposed != null && !proposed.isBlank() && proposed.length() <= 1000) {
             String normalized = WHITESPACE.matcher(proposed).replaceAll(" ").trim();
             String[] tokens = normalized.split(" ");
@@ -115,6 +144,7 @@ public class ClaimVerifier {
                     var original = originals.find(hit.documentId(), row.getPageStart(), pattern);
                     available = original.available();
                     quote = original.quote();
+                    originalContext = original.context();
                 }
             }
         }
@@ -128,7 +158,7 @@ public class ClaimVerifier {
                 hit.chunkId(), available ? row.getSectionPath() : null, available ? row.getPageStart() : null,
                 available ? row.getPageEnd() : null, hit.score(), id, quote, status,
                 available ? row.getPipelineVersion() : null, hash, available ? row.getChunkIndex() : null, attempted);
-        return new Located(snapshot, available ? row.getContent() : null);
+        return new Located(snapshot, available ? row.getContent() : null, originalContext);
     }
 
     public static String hashText(String text) {

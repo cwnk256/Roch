@@ -106,4 +106,80 @@ class ClaimVerifierTest {
         assertEquals(SourceStatus.QUOTE_MISMATCH, verify(1, "0 天。").evidences().getFirst().sourceStatus());
         verifyNoInteractions(judge);
     }
+
+    @Test void rejectsWrongRank() {
+        String table = """
+                得分 排名
+                中国 美国 德国 中国 美国 德国
+                领域汇总 23.10 10.23 5.11 1 2 3
+                """;
+        var claim = check("中国的研究前沿热度指数为23.10分，排名第二。",
+                table, "领域汇总 23.10");
+        assertEquals(SourceStatus.MATCHED, claim.evidences().getFirst().sourceStatus());
+        assertEquals(SupportStatus.INSUFFICIENT, claim.claim().supportStatus());
+        assertEquals(SupportStatus.INSUFFICIENT,
+                check("中国在数学领域位居榜首。", "中国在数学领域排名第二。", "中国在数学领域排名第二。")
+                        .claim().supportStatus());
+    }
+
+    @Test void alignsParallelCountriesAndRanksInProse() {
+        String source = "德国、英国和法国的得分分别为9.09、8.71和7.08，排名第三、第四和第五。";
+        assertEquals(SupportStatus.SUPPORTED, check(source, source, source).claim().supportStatus());
+        assertEquals(SupportStatus.SUPPORTED, check("德国得分9.09分，位列第三。", source, source).claim().supportStatus());
+        assertEquals(SupportStatus.INSUFFICIENT, check("法国得分9.09分。", source, source).claim().supportStatus());
+        assertEquals(SupportStatus.INSUFFICIENT, check("法国排名第三。", source, source).claim().supportStatus());
+    }
+
+    @Test void rejectsWrongTableColumn() {
+        String table = """
+                得分 排名
+                美国中国德国美国中国德国
+                国家/地区研究前沿热度指数16.95 15.62 9.09 123
+                国家/地区影响度8.46 7.22 4.77 123
+                """;
+        String row = "国家/地区影响度8.46 7.22 4.77 123";
+        assertEquals(SupportStatus.SUPPORTED,
+                check("中国的国家/地区影响度为7.22分，排名第二。", table, row).claim().supportStatus());
+        assertEquals(SupportStatus.INSUFFICIENT,
+                check("美国的国家/地区影响度为7.22分。", table, row).claim().supportStatus());
+        assertEquals(SupportStatus.INSUFFICIENT,
+                check("中国的研究前沿热度指数为7.22分。", table, row).claim().supportStatus());
+        assertEquals(SupportStatus.INSUFFICIENT,
+                check("中国的国家/地区影响度为7.22分，排名第三。", table, row).claim().supportStatus());
+        assertEquals(SupportStatus.INSUFFICIENT,
+                check("中国的国家/地区影响度为7.22分。",
+                        row, row).claim().supportStatus());
+    }
+
+    @Test void rejectsWrongObject() {
+        assertEquals(SupportStatus.INSUFFICIENT,
+                check("K22 的巡检周期为30天。", "K21 的巡检周期为30天。", "K21 的巡检周期为30天。").claim().supportStatus());
+    }
+
+    @Test void rejectsWrongUnit() {
+        assertEquals(SupportStatus.INSUFFICIENT,
+                check("K21 的巡检周期为30天。", "K21 的巡检周期为30小时。", "K21 的巡检周期为30小时。").claim().supportStatus());
+    }
+
+    @Test void rejectsRecommendationAsRequirement() {
+        assertEquals(SupportStatus.INSUFFICIENT,
+                check("必须每月巡检。", "建议每月巡检。", "建议每月巡检。").claim().supportStatus());
+    }
+
+    @Test void supportsExactCurrencyEquivalenceInTheSamePeriodAndMetric() {
+        assertEquals(SupportStatus.SUPPORTED,
+                check("2025年甲项目预算为1000000元。", "甲项目2025年预算100万元。", "甲项目2025年预算100万元。")
+                        .claim().supportStatus());
+    }
+
+    private ClaimVerifier.VerifiedClaim check(String claim, String source, String quote) {
+        var row = persisted("d");
+        row.setContent(source);
+        when(chunks.findById("c")).thenReturn(Optional.of(row));
+        when(judge.judge(anyString(), anyList())).thenReturn(
+                new ClaimSupportJudge.Judgment(SupportStatus.SUPPORTED, "模型判断支持。"));
+        var selected = new RetrievedChunk("c", "d", "index.pdf", source, null, 5, 5, 0, 0.99);
+        return verifier.verifyStrict("C1", claim, List.of(new ClaimVerifier.Citation(1, quote)),
+                List.of(selected), Set.of("d"));
+    }
 }

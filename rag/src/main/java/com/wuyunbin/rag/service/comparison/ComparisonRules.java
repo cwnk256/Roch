@@ -1,6 +1,7 @@
 package com.wuyunbin.rag.service.comparison;
 
 import java.math.BigDecimal;
+import java.text.Normalizer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -22,40 +23,55 @@ final class ComparisonRules {
     }
 
     static Fact fact(String id, ComparisonCandidate candidate, boolean evidenceVerified, String originalQuote) {
-        String quote = clean(candidate.quote());
+        return fact(id, candidate, evidenceVerified, originalQuote, false);
+    }
+
+    static Fact fact(String id, ComparisonCandidate candidate, boolean evidenceVerified, String originalQuote, boolean strict) {
+        String quote = clean(strict ? originalQuote : candidate.quote());
         String object = clean(candidate.object());
         String metric = clean(candidate.metric());
         String condition = clean(candidate.condition());
         String period = clean(candidate.period());
         String value = clean(candidate.rawValue());
         String unit = clean(candidate.unit());
+        String quoteKey = strict ? normalizedText(quote) : compact(quote);
         boolean grounded = evidenceVerified && !value.isBlank() && !metric.isBlank()
-                && List.of(object, metric, condition, period, value, unit).stream()
-                .allMatch(field -> compact(quote).contains(compact(field)));
+                && List.of(object, metric, condition, period).stream().allMatch(field -> strict
+                        ? equipmentKey(quoteKey).contains(equipmentKey(normalizedText(field)))
+                        : quoteKey.contains(compact(field)));
+        String parsedValue = strict ? normalizedText(value) : value;
+        String parsedUnit = strict ? normalizedText(unit) : unit;
+        grounded &= quoteKey.contains(strict ? parsedValue : compact(value))
+                && quoteKey.contains(strict ? parsedUnit : compact(unit));
         String normalized = null;
         String normalizedUnit = null;
-        boolean numeric = NUMBER.matcher(value).matches();
+        boolean numeric = NUMBER.matcher(parsedValue).matches();
         if (numeric) {
             // Anchor signs, decimals, thousands separators and magnitude units together.
-            String quantity = Pattern.quote(compact(value + unit));
+            String quantity = Pattern.quote(compact(parsedValue + parsedUnit));
             grounded &= Pattern.compile("(?<![0-9.,+−－-])" + quantity + "(?![0-9.,])")
-                    .matcher(compact(quote)).find();
-            if (grounded && !unit.isEmpty()) {
-                BigDecimal multiplier = switch (unit) {
+                    .matcher(quoteKey).find();
+            if (grounded && !parsedUnit.isEmpty()) {
+                BigDecimal multiplier = switch (parsedUnit) {
                     case "亿元" -> BigDecimal.valueOf(100_000_000);
                     case "万元" -> BigDecimal.valueOf(10_000);
                     case "千元" -> BigDecimal.valueOf(1_000);
                     case "周", "星期" -> BigDecimal.valueOf(7);
                     case "天", "日", "元", "小时", "月", "个月", "年", "%" -> BigDecimal.ONE;
+                    case "分钟", "秒", "秒钟", "美元", "欧元" -> strict ? BigDecimal.ONE : null;
+                    case "万美元", "万欧元" -> strict ? BigDecimal.valueOf(10_000) : null;
                     default -> null;
                 };
                 if (multiplier != null) {
-                    normalized = new BigDecimal(value.replace(",", "")).multiply(multiplier).stripTrailingZeros().toPlainString();
-                    normalizedUnit = switch (unit) {
+                    normalized = new BigDecimal(parsedValue.replace(",", "")).multiply(multiplier).stripTrailingZeros().toPlainString();
+                    normalizedUnit = switch (parsedUnit) {
                         case "元", "千元", "万元", "亿元" -> currencyUnit(quote);
                         case "周", "星期", "天", "日" -> "天";
                         case "个月" -> "月";
-                        default -> unit;
+                        case "万美元" -> "美元";
+                        case "万欧元" -> "欧元";
+                        case "秒钟" -> "秒";
+                        default -> parsedUnit;
                     };
                 }
             }
@@ -69,6 +85,10 @@ final class ComparisonRules {
     }
 
     static List<Conclusion> conclusions(List<Source> sources, List<Row> rows) {
+        return conclusions(sources, rows, false);
+    }
+
+    static List<Conclusion> conclusions(List<Source> sources, List<Row> rows, boolean strict) {
         List<Conclusion> result = new ArrayList<>();
         for (Row row : rows) {
             for (int i = 0; i < sources.size(); i++) {
@@ -82,7 +102,7 @@ final class ComparisonRules {
                     for (int j = i + 1; j < sources.size(); j++) {
                         for (Fact other : row.cells().get(j).facts()) {
                             if (other.verified()) {
-                                result.add(compare(row.dimension(), left, fact, sources.get(j), other));
+                                result.add(compare(row.dimension(), left, fact, sources.get(j), other, strict));
                             }
                         }
                     }
@@ -92,13 +112,13 @@ final class ComparisonRules {
         return List.copyOf(result);
     }
 
-    private static Conclusion compare(String dimension, Source left, Fact a, Source right, Fact b) {
+    private static Conclusion compare(String dimension, Source left, Fact a, Source right, Fact b, boolean strict) {
         String names = left.fileName() + " 与 " + right.fileName();
         List<String> ids = List.of(a.claimId(), b.claimId());
         if (a.textual() && b.textual() && compact(a.quote()).equals(compact(b.quote()))) {
             return new Conclusion(Kind.COMMON, dimension, names + " 均记载：" + a.quote(), ids);
         }
-        String gap = scopeGap(a, b);
+        String gap = scopeGap(a, b, strict);
         if (gap != null) return new Conclusion(Kind.INCOMPARABLE, dimension, names + "：" + gap, ids);
         if (a.textual() && b.textual()) {
             boolean sameAction = actionKey(a).equals(actionKey(b));
@@ -109,42 +129,88 @@ final class ComparisonRules {
             return new Conclusion(kind, dimension,
                     names + " 分别记载「" + a.quote() + "」与「" + b.quote() + "」", ids);
         }
-        if (a.normalizedUnit() == null || !a.normalizedUnit().equals(b.normalizedUnit())
-                || a.normalizedValue() == null || b.normalizedValue() == null) {
+        BigDecimal secondsA = strict ? fixedDuration(a) : null;
+        BigDecimal secondsB = strict ? fixedDuration(b) : null;
+        boolean compareFixedDurations = secondsA != null && secondsB != null;
+        if (!compareFixedDurations && (a.normalizedUnit() == null || !a.normalizedUnit().equals(b.normalizedUnit())
+                || a.normalizedValue() == null || b.normalizedValue() == null)) {
             return new Conclusion(Kind.INCOMPARABLE, dimension, names + "：单位缺失或无法确定性换算", ids);
         }
         String values = left.fileName() + " " + a.rawValue() + a.unit() + "，" + right.fileName()
                 + " " + b.rawValue() + b.unit();
-        if (a.normalizedValue().equals(b.normalizedValue()) && a.modality().equals(b.modality())) {
+        BigDecimal valueA = compareFixedDurations ? secondsA : new BigDecimal(a.normalizedValue());
+        BigDecimal valueB = compareFixedDurations ? secondsB : new BigDecimal(b.normalizedValue());
+        boolean equal = valueA.compareTo(valueB) == 0;
+        if (equal && a.modality().equals(b.modality())) {
             return new Conclusion(Kind.COMMON, dimension, values + "；换算后数值相同", ids);
         }
         // Require an explicit fixed value on both sides. Limits and recommendations may both be satisfied.
-        if (!a.normalizedValue().equals(b.normalizedValue()) && a.fixed() && b.fixed()) {
+        if (!equal && a.fixed() && b.fixed()) {
             return new Conclusion(Kind.POSSIBLE_CONFLICT, dimension, values + "；相同口径的固定值不一致。"
                     + names + " 分别记载「" + a.quote() + "」与「" + b.quote() + "」", ids);
         }
-        if (!a.condition().isBlank() && (disjointBounds(a, b) || disjointBounds(b, a))) {
+        if (!a.condition().isBlank() && (disjointBounds(a, b, valueA, valueB) || disjointBounds(b, a, valueB, valueA))) {
             return new Conclusion(Kind.POSSIBLE_CONFLICT, dimension, values + "；同一条件下的下限高于上限。"
                     + names + " 分别记载「" + a.quote() + "」与「" + b.quote() + "」", ids);
         }
         return new Conclusion(Kind.DIFFERENT, dimension, values + "；原文的数值或限定语不同", ids);
     }
 
-    private static boolean disjointBounds(Fact lower, Fact upper) {
+    private static boolean disjointBounds(Fact lower, Fact upper, BigDecimal lowerValue, BigDecimal upperValue) {
         return lower.modality().equals("含下限") && upper.modality().equals("含上限")
-                && new BigDecimal(lower.normalizedValue()).compareTo(new BigDecimal(upper.normalizedValue())) > 0;
+                && lowerValue.compareTo(upperValue) > 0;
     }
 
-    private static String scopeGap(Fact a, Fact b) {
+    private static String scopeGap(Fact a, Fact b, boolean strict) {
         if (a.object().isBlank() || b.object().isBlank()) return "原文缺少明确的比较对象";
         if (!objectKey(a.object()).equals(objectKey(b.object()))) return "比较对象不同";
-        if (!ExplicitComparisonFacts.operationKey(compact(a.metric())).equals(ExplicitComparisonFacts.operationKey(compact(b.metric()))))
+        if (!metricKey(a, strict).equals(metricKey(b, strict)))
             return "指标口径不同（" + a.metric() + " / " + b.metric() + "）";
         if (!periodKey(a.period()).equals(periodKey(b.period()))) return "期间不同或单侧缺失（" + label(a.period()) + " / " + label(b.period()) + "）";
-        if (!compact(a.condition()).equals(compact(b.condition()))) return "适用条件不同或单侧缺失（" + label(a.condition()) + " / " + label(b.condition()) + "）";
+        if (!conditionKey(a.condition(), strict).equals(conditionKey(b.condition(), strict)))
+            return "适用条件不同或单侧缺失（" + label(a.condition()) + " / " + label(b.condition()) + "）";
         if (a.period().isBlank() && (monetary(a) || monetary(b))) return "金额对应的期间缺失";
         if (a.condition().isBlank() && (a.fixed() || b.fixed())) return "固定值的适用条件缺失";
         return null;
+    }
+
+    private static BigDecimal fixedDuration(Fact fact) {
+        if (fact.normalizedValue() == null || fact.normalizedUnit() == null) return null;
+        long seconds = switch (fact.normalizedUnit()) {
+            case "天" -> 86400;
+            case "小时" -> 3600;
+            case "分钟" -> 60;
+            case "秒" -> 1;
+            default -> 0;
+        };
+        return seconds == 0 ? null : new BigDecimal(fact.normalizedValue()).multiply(BigDecimal.valueOf(seconds));
+    }
+
+    private static String metricKey(Fact fact, boolean strict) {
+        if (!strict) return ExplicitComparisonFacts.operationKey(compact(fact.metric()));
+        String metric = normalizedText(fact.metric()).replaceFirst("[。.]$", "");
+        String value = normalizedText(fact.rawValue() + fact.unit());
+        if (!value.isEmpty() && (metric.endsWith("为" + value) || metric.endsWith("是" + value)
+                || metric.endsWith(":" + value) || metric.endsWith("=" + value))) {
+            metric = metric.substring(0, metric.length() - value.length() - 1);
+        }
+        return ExplicitComparisonFacts.operationKey(metric.replaceAll("校验|校正", "校准"))
+                .replaceFirst("(校准|巡检|检修|检查|维护|保养)(?:间隔|周期)$", "$1")
+                .replaceFirst("^年度(?=.{0,10}预算$)", "");
+    }
+
+    private static String conditionKey(String condition, boolean strict) {
+        return strict ? normalizedText(condition).replaceFirst("^在", "").replaceFirst("[下时]$", "")
+                : compact(condition);
+    }
+
+    private static String normalizedText(String value) {
+        return compact(Normalizer.normalize(value, Normalizer.Form.NFKC)).replace('−', '-');
+    }
+
+    private static String equipmentKey(String value) {
+        return Pattern.compile(EQUIPMENT_CODE, Pattern.CASE_INSENSITIVE).matcher(value)
+                .replaceAll(match -> match.group().toLowerCase(Locale.ROOT));
     }
 
     private static String modality(String quote) {
