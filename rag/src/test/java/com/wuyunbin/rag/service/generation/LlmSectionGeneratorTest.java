@@ -17,6 +17,7 @@ import org.springframework.core.io.DefaultResourceLoader;
 import java.net.SocketTimeoutException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
@@ -104,6 +105,29 @@ class LlmSectionGeneratorTest {
         assertEquals(List.of(SupportStatus.SUPPORTED,SupportStatus.INSUFFICIENT),result.claims().stream().map(Claim::supportStatus).toList());
         assertEquals(SOURCE_TEXT,result.evidences().getFirst().quote());
         assertTrue(result.evidences().getFirst().nativeLocation().startsWith("原文字符"));
+    }
+
+    @Test void tableAnswerUsesAnOfferedFactNumberInsteadOfModelTranscription() {
+        var verifier = mock(ClaimVerifier.class);
+        String proven = "甲工厂的质检得分为17.5，排名第2";
+        var citation = new ClaimVerifier.Citation(1, SOURCE_TEXT, null, "数据表", List.of(proven), "表3 数据表");
+        when(verifier.evidenceOptions(anyList(), anyString(), anyInt()))
+                .thenReturn(new ClaimVerifier.EvidenceOptions("[S1E1]", Map.of("S1E1", citation)));
+        when(verifier.verifyStrict(anyString(), anyString(), anyList(), anyList(), anySet())).thenAnswer(call ->
+                new ClaimVerifier.VerifiedClaim(Claim.unsupported(call.getArgument(0), call.getArgument(1), "测试"), List.of()));
+        var anchored = new LlmSectionGenerator(chatClient, new PromptTemplates(new DefaultResourceLoader()),
+                new DocumentTaskProperties(), verifier);
+        when(response.content()).thenReturn("""
+                {"claims":[{"question":1,"text":"甲工厂的质检得分为9.3。","evidenceIds":["S1E1"],"tableFact":1},
+                           {"question":2,"text":"猜测的排名。","evidenceIds":["S1E1"],"tableFact":9}]}
+                """);
+        var plan = new ReportSectionPlan("核对", "1. 表3的对象得分和排名\n2. 表3的另外一项");
+        var result = anchored.generateAnchoredBatch(DocumentTaskType.REPORT, plan, List.of(SOURCE), Set.of("doc-1"),
+                "batch", 150, ignored -> {});
+        assertEquals(proven, result.claims().getFirst().text());
+        verify(verifier).verifyStrict(anyString(), eq(proven), eq(List.of(citation)), eq(List.of(SOURCE)), eq(Set.of("doc-1")));
+        verify(verifier).verifyStrict(anyString(), eq("猜测的排名。"), eq(java.util.Collections.singletonList(null)),
+                eq(List.of(SOURCE)), eq(Set.of("doc-1")));
     }
     @Test
     void invalidCitationsDowngradeOnlyTheirClaimAndQuestionOrderIsRestored() {

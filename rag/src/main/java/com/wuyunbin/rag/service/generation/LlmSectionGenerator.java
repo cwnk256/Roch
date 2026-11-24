@@ -165,14 +165,31 @@ public class LlmSectionGenerator implements SectionGenerator {
         List<OrderedClaim> ordered = new ArrayList<>();
         for (JsonNode claim : claims) {
             String text = stringValue(claim.get("text"));
-            if (text == null || text.isBlank()) continue;
             Integer question = positiveInteger(claim.get("question"));
-            ordered.add(new OrderedClaim(question == null ? Integer.MAX_VALUE : question,
-                    new DraftClaim(text, options == null ? readCitations(claim.get("citations")) : readAnchors(claim.get("evidenceIds"), options, scope, question))));
+            List<ClaimVerifier.Citation> citations = options == null ? readCitations(claim.get("citations"))
+                    : readAnchors(claim.get("evidenceIds"), options, scope, question);
+            JsonNode tableFact = claim.get("tableFact");
+            if (options != null && tableFact != null && !tableFact.isNull()) {
+                String proven = resolveTableFact(positiveInteger(tableFact), citations);
+                if (proven != null) {
+                    text = proven;
+                } else {
+                    citations = Collections.singletonList(null);
+                    if (text == null || text.isBlank()) text = "指定的表格事实无法回查。";
+                }
+            }
+            if (text == null || text.isBlank()) continue;
+            ordered.add(new OrderedClaim(question == null ? Integer.MAX_VALUE : question, new DraftClaim(text, citations)));
         }
         if (!claims.isEmpty() && ordered.isEmpty()) throw new BatchFailure(BatchFailureKind.INVALID_RESPONSE, null);
         ordered.sort(Comparator.comparingInt(OrderedClaim::question));
         return new SectionDraft(ordered.stream().map(OrderedClaim::claim).toList(), stringValue(draft.get("unattributedText")));
+    }
+
+    private static String resolveTableFact(Integer number, List<ClaimVerifier.Citation> citations) {
+        if (number == null || citations.size() != 1 || citations.getFirst() == null) return null;
+        var facts = citations.getFirst().physicalFacts();
+        return facts == null || number > facts.size() ? null : facts.get(number - 1);
     }
 
     private static List<ClaimVerifier.Citation> readAnchors(JsonNode ids, ClaimVerifier.EvidenceOptions options, TableQuestionScope scope, Integer question) {

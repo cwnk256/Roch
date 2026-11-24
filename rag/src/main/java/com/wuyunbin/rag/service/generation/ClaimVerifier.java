@@ -116,13 +116,22 @@ public class ClaimVerifier {
         var visible = new LinkedHashMap<String,Citation>();
         for (var entry : ranked) {
             Citation citation = entry.getValue();
-            String passage = Objects.requireNonNullElse(citation.nativeContext(), citation.quote());
+            String passage = renderPassage(citation);
             String line = "[" + entry.getKey() + "] " + Objects.toString(citation.cellLocation(), "") + " " + passage + "\n";
             if (prompt.length() + line.length() > budget) continue;
             visible.put(entry.getKey(), citation);
             prompt.append(line);
         }
         return new EvidenceOptions(prompt.toString(), Collections.unmodifiableMap(visible));
+    }
+
+    private static String renderPassage(Citation citation) {
+        if (citation.physicalFacts() == null) return Objects.requireNonNullElse(citation.nativeContext(), citation.quote());
+        StringJoiner facts = new StringJoiner("；", Objects.toString(citation.tableCaption(), "") + "\n", "");
+        for (int index = 0; index < citation.physicalFacts().size(); index++) {
+            facts.add("(" + (index + 1) + ") " + citation.physicalFacts().get(index));
+        }
+        return facts.toString();
     }
 
     private static Set<String> bigrams(String text) {
