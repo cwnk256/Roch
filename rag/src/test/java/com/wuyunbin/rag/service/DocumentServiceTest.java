@@ -162,6 +162,23 @@ class DocumentServiceTest {
     }
 
     @Test
+    void cleanupFailureDoesNotTurnCommittedReindexIntoFailure() {
+        DocumentService service = serviceWithCounts(0, 1);
+        UUID batch = UUID.randomUUID();
+        when(cleaningTextSplitter.apply(anyList())).thenReturn(List.of(new Document("replacement")));
+        when(cleanupJournal.prepare(anyString(), anyList(), eq(List.of("previous-vector")))).thenReturn(batch);
+        doThrow(new IllegalStateException("cleanup unavailable")).when(cleanupJournal).clean(batch);
+
+        DocumentResponse response = service.importTxt(txtFile());
+        assertDoesNotThrow(() -> TransactionSynchronizationManager.getSynchronizations()
+                .forEach(TransactionSynchronization::afterCommit));
+
+        assertEquals(1, response.chunkCount());
+        assertFalse(response.duplicated());
+        verify(cleanupJournal).clean(batch);
+    }
+
+    @Test
     void postgresWriteFailurePreservesPreviousVectors() {
         DocumentService service = serviceWithCounts(0, 1);
         when(cleaningTextSplitter.apply(anyList())).thenReturn(List.of(new Document("replacement")));
@@ -178,9 +195,10 @@ class DocumentServiceTest {
         UUID batch = UUID.randomUUID();
         when(cleanupJournal.prepare(anyString(), eq(List.of(replacement.getId())), eq(List.of("previous-vector")))).thenReturn(batch);
         doThrow(new IllegalStateException("vector write failed")).when(vectorStore).add(anyList());
+        doThrow(new IllegalStateException("cleanup unavailable")).when(cleanupJournal).clean(batch);
         assertThrows(IllegalStateException.class, () -> service.importTxt(txtFile()));
-        TransactionSynchronizationManager.getSynchronizations().forEach(
-                synchronization -> synchronization.afterCompletion(TransactionSynchronization.STATUS_ROLLED_BACK));
+        assertDoesNotThrow(() -> TransactionSynchronizationManager.getSynchronizations().forEach(
+                synchronization -> synchronization.afterCompletion(TransactionSynchronization.STATUS_ROLLED_BACK)));
         verify(cleanupJournal).clean(batch);
     }
 

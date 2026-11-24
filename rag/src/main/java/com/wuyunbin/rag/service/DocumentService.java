@@ -298,15 +298,23 @@ public class DocumentService {
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
             @Override
             public void afterCommit() {
-                cleanupJournal.clean(batchId);
+                tryCleanObsoleteVectors(batchId);
             }
 
             @Override
             public void afterCompletion(int status) {
-                if (status == STATUS_ROLLED_BACK) cleanupJournal.clean(batchId);
+                if (status == STATUS_ROLLED_BACK) tryCleanObsoleteVectors(batchId);
             }
         });
         vectorStore.add(chunks);
+    }
+
+    private void tryCleanObsoleteVectors(UUID batchId) {
+        try {
+            cleanupJournal.clean(batchId);
+        } catch (RuntimeException exception) {
+            log.warn("向量清理失败，保留批次供后台重试 batchId={}", batchId, exception);
+        }
     }
 
     private static String documentFilter(String md5) {
