@@ -81,7 +81,11 @@ desktop/obj/
 .DS_Store
 Thumbs.db
 desktop.ini
-/plan/
+
+### 本地计划与草稿 ###
+[Pp][Ll][Aa][Nn]/
+[Pp][Ll][Aa][Nn][Ss]/
+[Pp][Ll][Aa][Nn].md
 
 /.worktrees/
 !/.agents/
