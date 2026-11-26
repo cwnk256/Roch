@@ -8,6 +8,7 @@ import com.wuyunbin.rag.service.DocumentService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
+import org.springframework.core.io.ByteArrayResource;
 import org.springframework.http.MediaType;
 import org.springframework.http.ContentDisposition;
 import org.springframework.http.HttpHeaders;
@@ -191,7 +192,7 @@ public class DocumentController {
                     .header(HttpHeaders.CONTENT_DISPOSITION, disposition.filename(name, StandardCharsets.UTF_8).build().toString())
                     .header("X-Content-Type-Options", "nosniff")
                     .contentType(pdf ? MediaType.APPLICATION_PDF : MediaType.APPLICATION_OCTET_STREAM)
-                    .contentLength(original.content().length).body(original.content());
+                    .body(new ByteArrayResource(original.content()));
         } catch (IllegalStateException e) {
             return ResponseEntity.status(404).body(Map.of("error", e.getMessage()));
         }

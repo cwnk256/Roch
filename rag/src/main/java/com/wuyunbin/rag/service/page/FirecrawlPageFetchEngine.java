@@ -69,8 +69,7 @@ public class FirecrawlPageFetchEngine implements PageFetchEngine {
     public PageContent fetch(String url) {
         if (!isConfigured()) {
             throw new IllegalStateException(
-                    "Firecrawl API Key 未配置：请在 application.properties 填写 rag.page.firecrawl.api-key，"
-                            + "或设置环境变量 FIRECRAWL_API_KEY 后重试");
+                    "Firecrawl 密钥未配置。桌面版请在设置中配置，服务器部署请设置 FIRECRAWL_API_KEY。");
         }
         log.info("[PageFetch:firecrawl] 云端抓取网页，URL: {}", url);
 

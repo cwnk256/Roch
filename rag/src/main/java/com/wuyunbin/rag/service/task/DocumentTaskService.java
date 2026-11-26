@@ -1,13 +1,17 @@
 package com.wuyunbin.rag.service.task;
 
 import com.wuyunbin.rag.dto.*;
+import com.wuyunbin.rag.desktop.DesktopSettingsStore;
 import com.wuyunbin.rag.service.export.DocumentExporter;
 import com.wuyunbin.rag.service.generation.model.GeneratedDocument;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.util.Optional;
+import java.nio.file.Path;
+import java.util.concurrent.RejectedExecutionException;
 
 /**
  * 文档任务服务：负责任务生命周期（校验 → 创建 → 执行 → 导出 → 终态），
@@ -25,6 +29,8 @@ public class DocumentTaskService {
     private final GeneratedDocumentStorage generatedDocumentStorage;
     private final TaskArtifactService artifactService;
     private final DocumentTaskRunner runner;
+    @Autowired(required = false)
+    private DesktopSettingsStore desktopSettings;
 
     /**
      * 创建文档任务并提交给后台执行器。
@@ -42,6 +48,13 @@ public class DocumentTaskService {
         // 3. 创建任务（PENDING）
         DocumentTask task = DocumentTask.create(request.type(), request.documentIds(), request.instruction());
         task.setConfiguration(configuration);
+        if (desktopSettings != null) {
+            var snapshot = desktopSettings.generationSnapshot();
+            if (snapshot.model().isBlank()) {
+                throw new IllegalArgumentException("请先在设置中选择并保存 LM Studio 生成模型。");
+            }
+            task.setGenerationSnapshot(snapshot);
+        }
         return enqueue(task);
     }
 
@@ -52,8 +65,15 @@ public class DocumentTaskService {
                 task.getInstruction().length());
 
         var pending = DocumentTaskResponse.from(task);
-        runner.submit(task.getTaskId());
-        return pending;
+        try {
+            runner.submit(task.getTaskId());
+            return pending;
+        } catch (RejectedExecutionException exception) {
+            task.markFailed("报告队列已满，请稍后重试。");
+            task.setErrorCode("TASK_QUEUE_FULL");
+            taskStore.update(task);
+            return DocumentTaskResponse.from(task);
+        }
     }
 
     /**
@@ -74,6 +94,7 @@ public class DocumentTaskService {
         validator.validateDocumentsExist(old.getDocumentIds());
         DocumentTask retry = DocumentTask.create(old.getType(), old.getDocumentIds(), old.getInstruction());
         retry.setConfiguration(old.getConfiguration());
+        retry.setGenerationSnapshot(old.getGenerationSnapshot());
         return enqueue(retry);
     }
 
@@ -92,6 +113,7 @@ public class DocumentTaskService {
     public DocumentArtifactResponse reExportPdf(String taskId, ReportExportOptions options) {
         find(taskId).orElseThrow(() -> new IllegalArgumentException("任务不存在: " + taskId));
         GeneratedDocument document = generatedDocumentStorage.read(taskId);
-        return runner.reExport(taskId, document, options);
+        Path output = desktopSettings == null ? null : Path.of(desktopSettings.get().outputDirectory());
+        return runner.reExport(taskId, document, options, output);
     }
 }

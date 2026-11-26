@@ -2,6 +2,7 @@ package com.wuyunbin.rag.service.task;
 
 import com.wuyunbin.rag.dto.DocumentTask;
 import com.wuyunbin.rag.dto.ReportConfiguration;
+import com.wuyunbin.rag.dto.ReportGenerationSnapshot;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.wuyunbin.rag.dto.PageResult;
@@ -66,6 +67,8 @@ public class JpaDocumentTaskStore implements DocumentTaskStore {
         entity.setInstruction(task.getInstruction());
         try {
             entity.setConfigurationJson(task.getConfiguration() == null ? null : objectMapper.writeValueAsString(task.getConfiguration()));
+            entity.setGenerationSnapshotJson(task.getGenerationSnapshot() == null ? null
+                    : objectMapper.writeValueAsString(task.getGenerationSnapshot()));
         } catch (JsonProcessingException e) {
             throw new IllegalStateException("任务配置无法保存", e);
         }
@@ -89,12 +92,15 @@ public class JpaDocumentTaskStore implements DocumentTaskStore {
         task.setTaskId(entity.getTaskId());
         task.setType(entity.getType());
         task.setInstruction(entity.getInstruction());
-        if (entity.getConfigurationJson() != null) {
-            try {
+        try {
+            if (entity.getConfigurationJson() != null) {
                 task.setConfiguration(objectMapper.readValue(entity.getConfigurationJson(), ReportConfiguration.class));
-            } catch (JsonProcessingException e) {
-                throw new IllegalStateException("任务配置无法读取：" + entity.getTaskId(), e);
             }
+            if (entity.getGenerationSnapshotJson() != null) {
+                task.setGenerationSnapshot(objectMapper.readValue(entity.getGenerationSnapshotJson(), ReportGenerationSnapshot.class));
+            }
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("任务配置无法读取：" + entity.getTaskId(), e);
         }
         task.setTitle(entity.getTitle());
         task.setStatus(entity.getStatus());

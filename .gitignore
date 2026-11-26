@@ -59,14 +59,18 @@ venv/
 ### 本地构建工具（字体子集化依赖等，禁止入库） ###
 .tools/
 /scripts/*
+!/scripts/build-windows.ps1
 !/scripts/trace_report_acceptance.py
 !/scripts/trace_report_quality.py
 
 ### 前端（Vue + Vite）构建产物与依赖 ###
 web/node_modules/
+web/.npm-cache/
 web/dist/
 web/.tmp-tests/
 web/tsconfig.tsbuildinfo
+desktop/bin/
+desktop/obj/
 
 ### 环境变量与本地密钥 ###
 .env

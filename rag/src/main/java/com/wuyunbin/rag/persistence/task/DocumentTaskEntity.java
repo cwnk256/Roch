@@ -29,6 +29,8 @@ public class DocumentTaskEntity {
     private String instruction;
     @Column(name = "configuration_json", columnDefinition = "TEXT")
     private String configurationJson;
+    @Column(name = "generation_snapshot_json", columnDefinition = "TEXT")
+    private String generationSnapshotJson;
     private String title;
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 20)

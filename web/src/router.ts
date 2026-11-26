@@ -7,6 +7,7 @@ import ImportDocumentView from './views/ImportDocumentView.vue'
 import DocumentManagementView from './views/DocumentManagementView.vue'
 import DocumentReportsView from './views/DocumentReportsView.vue'
 import WebPageView from './views/WebPageView.vue'
+import {desktopBridge} from './lib/desktop-bridge'
 
 export const router = createRouter({
     history: createWebHistory(), routes: [
@@ -26,6 +27,9 @@ export const router = createRouter({
             component: DocumentReportsView,
             meta: {title: '总结 / 报告'}
         },
-        {path: '/webpage', component: WebPageView, meta: {title: '获取外部网页'}}
+        {path: '/webpage', component: WebPageView, meta: {title: '获取外部网页'}},
+        ...(desktopBridge() ? [{
+            path: '/settings', component: () => import('./views/DesktopSettingsView.vue'), meta: {title: '设置'}
+        }] : [])
     ]
 })

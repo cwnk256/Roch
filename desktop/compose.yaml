@@ -1,0 +1,72 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: roch
+      POSTGRES_USER: roch
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+    ports:
+      - "127.0.0.1:${ROCH_POSTGRES_PORT:?required}:5432"
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "roch", "-d", "roch"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.18
+    command: ["etcd", "--advertise-client-urls=http://127.0.0.1:2379", "--listen-client-urls=http://0.0.0.0:2379", "--data-dir=/etcd"]
+    volumes:
+      - etcd:/etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  minio:
+    image: milvusdb/minio:RELEASE.2024-12-18T13-15-44Z
+    command: ["server", "/minio_data"]
+    environment:
+      MINIO_ROOT_USER: rochadmin
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:?required}
+    volumes:
+      - minio:/minio_data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  standalone:
+    image: milvusdb/milvus:v3.0.1
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+      MINIO_ACCESS_KEY_ID: rochadmin
+      MINIO_SECRET_ACCESS_KEY: ${MINIO_SECRET_KEY:?required}
+      MINIO_USE_SSL: "false"
+      MINIO_BUCKET_NAME: roch-desktop
+    ports:
+      - "127.0.0.1:${ROCH_MILVUS_PORT:?required}:19530"
+    volumes:
+      - milvus:/var/lib/milvus
+    depends_on:
+      etcd:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  postgres:
+  etcd:
+  minio:
+  milvus:

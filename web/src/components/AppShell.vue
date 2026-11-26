@@ -13,8 +13,10 @@ import {
   MessagesSquare,
   PanelLeftClose,
   ScrollText,
+  Settings,
   X
 } from 'lucide-vue-next'
+import {desktopBridge} from '../lib/desktop-bridge'
 
 const route = useRoute();
 const open = ref(false)
@@ -26,7 +28,8 @@ const items = [
     to: '/reports',
     label: '总结 / 报告',
     icon: ScrollText
-  }
+  },
+  ...(desktopBridge() ? [{to: '/settings', label: '设置', icon: Settings}] : [])
 ]
 const title = computed(() => String(route.meta.title || '工作台'))
 

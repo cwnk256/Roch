@@ -48,8 +48,12 @@ public class GeneratedDocumentStorage {
     }
 
     public Path save(String taskId, GeneratedDocument document) {
+        return save(taskId, document, Path.of(properties.getOutputDir()));
+    }
+
+    public Path save(String taskId, GeneratedDocument document, Path outputRoot) {
         try {
-            Path dir = Paths.get(properties.getOutputDir(), taskId);
+            Path dir = outputRoot.resolve(taskId);
             Files.createDirectories(dir);
             Path output = dir.resolve("result.json");
             DocumentTaskEntity task = tasks.findByTaskId(taskId)
