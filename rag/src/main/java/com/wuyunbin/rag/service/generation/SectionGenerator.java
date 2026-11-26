@@ -47,6 +47,19 @@ public interface SectionGenerator {
         return generateBatch(type, plan, chunks, allowed, batchId, true);
     }
 
+    default GeneratedSection generateAnchoredBatch(DocumentTaskType type, ReportSectionPlan plan,
+                                                   List<RetrievedChunk> chunks, Set<String> allowed, String batchId,
+                                                   int budget, List<QuestionEvidence> questions,
+                                                   Consumer<List<ClaimVerifier.AnchorSpan>> onAnchors) {
+        return generateAnchoredBatch(type, plan, chunks, allowed, batchId, budget, onAnchors);
+    }
+
+    record QuestionEvidence(int number, String text, List<String> candidateChunkIds) {
+        public QuestionEvidence {
+            candidateChunkIds = List.copyOf(candidateChunkIds);
+        }
+    }
+
     enum BatchFailureKind { INVALID_RESPONSE, TIMEOUT }
 
     class BatchFailure extends RuntimeException {

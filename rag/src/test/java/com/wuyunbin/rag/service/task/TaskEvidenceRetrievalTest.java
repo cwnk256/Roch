@@ -91,9 +91,10 @@ class TaskEvidenceRetrievalTest {
         when(repository.findTop4ByDocMd5AndPageStartAndChunkIndexOrderByChunkIdAsc("a", 8, 5))
                 .thenReturn(List.of(row("other-document", "b", 8, 5, "北区 | 77 吨"), rows));
 
-        assertEquals(List.of("existing", "caption", "rows"), retrieval.supplement(
-                List.of(query), List.of(existing), Set.of("a"), 100).selected().stream()
+        var supplement = retrieval.supplement(List.of(query), List.of(existing), Set.of("a"), 100);
+        assertEquals(List.of("existing", "caption", "rows"), supplement.selected().stream()
                 .map(RetrievedChunk::chunkId).toList());
+        assertEquals(List.of(List.of("caption", "rows")), supplement.matchesByQuestion());
         assertEquals(List.of(existing), retrieval.supplement(
                 List.of(query), List.of(existing), Set.of("a"), 25).selected());
     }

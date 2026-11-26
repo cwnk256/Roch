@@ -168,25 +168,28 @@ public class ComparisonGenerator {
             return anchoredCell(source, Status.NOT_FOUND, ReasonCode.NO_ORIGINAL_EVIDENCE, "本次未找到依据");
         }
         Map<String, AnchoredComparisonFacts.Selection> candidates = new LinkedHashMap<>();
+        Set<String> exclusions = new LinkedHashSet<>();
         ReasonCode incomplete = null;
         try {
             var evidence = verifier.evidenceOptions(selected, scope.dimension(), budget);
             evidenceLog.anchors(taskId, section, batch, evidence.spans(selected), started);
             if (evidence.citations().isEmpty())
-                return anchoredCell(source, Status.NOT_FOUND, ReasonCode.NO_ORIGINAL_EVIDENCE, "本次未找到可回查的原文");
-            var inScope = evidence.citations().entrySet().stream()
-                    .filter(entry -> scope.permits(entry.getValue().quote())).toList();
-            if (inScope.isEmpty())
-                return anchoredCell(source, Status.NOT_FOUND, ReasonCode.OUTSIDE_SCOPE, "原文中未找到符合范围的事实");
-            var relevant = inScope.stream().filter(entry -> AnchoredComparisonFacts.possiblyRelevant(
+                return anchoredCell(source, Status.UNVERIFIED, ReasonCode.NO_ORIGINAL_EVIDENCE, "已检索到片段，但无法从中定位可核验的原文");
+            var relevant = evidence.citations().entrySet().stream().filter(entry -> AnchoredComparisonFacts.possiblyRelevant(
                     scope.dimension(), entry.getValue().quote())).toList();
             if (relevant.isEmpty())
                 return anchoredCell(source, Status.NOT_FOUND, ReasonCode.NO_MATCHING_FACT, "本次未找到符合当前维度的依据");
             List<Map.Entry<String, ClaimVerifier.Citation>> unresolved = new ArrayList<>();
             for (var entry : relevant) {
                 var literal = AnchoredComparisonFacts.literal(scope, entry.getValue());
-                if (literal == null) unresolved.add(entry);
-                else candidates.putIfAbsent(factKey(literal), literal);
+                if (literal == null) {
+                    unresolved.add(entry);
+                    continue;
+                }
+                var objectScope = scope.equipmentScope(literal.candidate().object());
+                if (objectScope.permitted()) candidates.putIfAbsent(factKey(literal), literal);
+                else if (!objectScope.exclusionReason().isBlank()) exclusions.add(objectScope.exclusionReason());
+                else incomplete = ReasonCode.INSUFFICIENT_SUPPORT;
             }
             if (!unresolved.isEmpty() && candidates.size() < ComparisonExtractor.MAX_FACTS) {
                 var narrowed = narrowEvidence(unresolved);
@@ -195,6 +198,8 @@ public class ComparisonGenerator {
                     var extracted = resolveDraft(scope, narrowed, draft);
                     if (extracted.size() < draft.numericFacts().size() + draft.obligationFacts().size())
                         incomplete = ReasonCode.INVALID_FIELD_OR_ANCHOR;
+                    else if (extracted.isEmpty())
+                        incomplete = ReasonCode.INSUFFICIENT_SUPPORT;
                     for (var fact : extracted) candidates.putIfAbsent(factKey(fact), fact);
                 } catch (RuntimeException ex) {
                     log.warn("对比补充事实提取失败 document={} dimension={}", source.documentId(), scope.dimension(), ex);
@@ -211,7 +216,10 @@ public class ComparisonGenerator {
                 return anchoredCell(source, Status.EXTRACTION_FAILED, incomplete, "未能完成原文事实提取");
             if (incomplete == ReasonCode.INVALID_FIELD_OR_ANCHOR)
                 return anchoredCell(source, Status.UNVERIFIED, incomplete, "提取结果在当前维度或原文中无法核实");
-            return anchoredCell(source, Status.NOT_FOUND, ReasonCode.NO_MATCHING_FACT, "本次未找到符合当前维度的依据");
+            if (incomplete == null && !exclusions.isEmpty())
+                return anchoredCell(source, Status.NOT_FOUND, ReasonCode.OUTSIDE_SCOPE, String.join("\n", exclusions));
+            return anchoredCell(source, Status.UNVERIFIED, ReasonCode.INSUFFICIENT_SUPPORT,
+                    "检索到可能相关的原文，尚无法核实符合当前范围的事实");
         }
 
         List<Fact> facts = new ArrayList<>();
@@ -238,6 +246,7 @@ public class ComparisonGenerator {
         String reason = allVerified ? "" : "部分或全部原文、事实或比较字段未通过核验";
         if (incomplete == ReasonCode.EXTRACTION_FAILED) reason = "部分原文的事实提取未完成";
         if (incomplete == ReasonCode.INVALID_FIELD_OR_ANCHOR) reason = "部分提取结果在当前维度或原文中无法核实";
+        if (incomplete == ReasonCode.INSUFFICIENT_SUPPORT) reason = "部分原文尚无法核实符合当前范围的事实";
         return new Cell(source.documentId(), found ? Status.FOUND : Status.UNVERIFIED,
                 reason, List.copyOf(facts), incomplete != null ? incomplete : allVerified ? null : ReasonCode.INSUFFICIENT_SUPPORT);
     }
@@ -268,7 +277,9 @@ public class ComparisonGenerator {
             byId.put(entry.getKey(), citation);
             prompt.append('[').append(entry.getKey()).append("] ");
             if (citation.cellLocation() != null) prompt.append(citation.cellLocation()).append(' ');
-            prompt.append(Objects.requireNonNullElse(citation.nativeContext(), citation.quote())).append('\n');
+            boolean table = citation.cellLocation() != null || citation.physicalFacts() != null;
+            String passage = table ? Objects.requireNonNullElse(citation.nativeContext(), citation.quote()) : citation.quote();
+            prompt.append(passage).append('\n');
         }
         return new ClaimVerifier.EvidenceOptions(prompt.toString(), Collections.unmodifiableMap(byId));
     }

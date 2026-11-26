@@ -25,14 +25,14 @@ public class TaskEvidenceLog {
                       int candidateCount, List<RetrievedChunk> selected, long startNanos) {
         if (!properties.isLogEnabled()) return;
         var passages = selected.stream().map(chunk -> new Passage(chunk.chunkId(), chunk.documentId(),
-                chunk.pageStart(), chunk.pageEnd(), chunk.content().length(), null)).toList();
+                chunk.pageStart(), chunk.pageEnd(), chunk.content().length(), null, null)).toList();
         write(taskId, section, batch, phase, outcome, candidateCount, passages, startNanos);
     }
 
     public void anchors(String taskId, int section, int batch, List<ClaimVerifier.AnchorSpan> spans, long startNanos) {
         if (!properties.isLogEnabled()) return;
         var passages = spans.stream().map(span -> new Passage(span.chunkId(), span.documentId(),
-                span.pageStart(), span.pageEnd(), span.characters(), span.start())).toList();
+                span.pageStart(), span.pageEnd(), span.characters(), span.start(), span.question())).toList();
         write(taskId, section, batch, "anchors", spans.isEmpty() ? "empty" : "available", spans.size(), passages, startNanos);
     }
 
@@ -50,5 +50,7 @@ public class TaskEvidenceLog {
                          int candidateCount, List<Passage> selected, long elapsedMillis) {}
     private record Passage(String chunkId, String documentId, Integer pageStart, Integer pageEnd, int characters,
                            @com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL)
-                           Integer start) {}
+                           Integer start,
+                           @com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL)
+                           Integer question) {}
 }

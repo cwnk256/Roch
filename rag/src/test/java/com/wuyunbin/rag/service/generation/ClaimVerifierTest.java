@@ -131,7 +131,7 @@ class ClaimVerifierTest {
 
         var options = verifier.evidenceOptions(selected, "inspection interval", 1_000);
         assertEquals(List.of(line), options.citations().values().stream().map(ClaimVerifier.Citation::quote).toList());
-        assertTrue(options.prompt().contains(qualifier));
+        assertFalse(options.prompt().contains(qualifier));
         assertEquals(4, options.spans(selected).getFirst().start());
         var citation = options.citations().values().iterator().next();
         var passages = List.of(new ClaimSupportJudge.Passage(line, "Maintenance handbook\n" + line + "\n" + qualifier));
@@ -143,6 +143,31 @@ class ClaimVerifierTest {
         assertEquals(line, checked.evidences().getFirst().quote());
         assertEquals(SupportStatus.INSUFFICIENT, checked.claim().supportStatus());
         org.mockito.Mockito.verify(judge).judge(unqualifiedClaim, passages);
+    }
+
+    @Test void citesTheContinuousOriginalAcrossAnOcrLineWrap() throws Exception {
+        String first = "Production now uses automated planning,";
+        String second = "inventory tracking and labeling.";
+        byte[] bytes = pdfWithTextLines(RenderingMode.NEITHER, "Section title", first, second);
+        String id = DigestUtils.md5DigestAsHex(bytes);
+        var storage = mock(DocumentStorage.class);
+        when(storage.load(id)).thenReturn(Optional.of(new DocumentStorage.StoredDocument(id, "manual.pdf", bytes)));
+        var row = persisted(id);
+        row.setFileName("manual.pdf");
+        row.setPageStart(1);
+        row.setPageEnd(1);
+        row.setContent(first + "\n" + second);
+        when(chunks.findById("c")).thenReturn(Optional.of(row));
+        var selected = List.of(new RetrievedChunk("c", id, "manual.pdf", row.getContent(), null, 1, 1, 0, 1));
+        var verifier = new ClaimVerifier(chunks, judge,
+                new OriginalPassages(storage, new PdfDocumentParser(new TableTextEnhancer()), null, null));
+
+        var options = verifier.evidenceOptions(selected, "production", 1_000);
+        var quotes = options.citations().values().stream().map(ClaimVerifier.Citation::quote).toList();
+        assertEquals(1, quotes.size());
+        assertTrue(quotes.getFirst().matches(java.util.regex.Pattern.quote(first)
+                + "\\s+" + java.util.regex.Pattern.quote(second)));
+        assertEquals(row.getContent().length(), options.spans(selected).getFirst().characters());
     }
 
     @Test void searchablePdfStillRejectsAnIncompleteSentence() throws Exception {

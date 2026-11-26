@@ -22,7 +22,7 @@ final class AnchoredComparisonFacts {
             "(?:校准|校验|校正|巡检|检修|检查|检测|维修|维护|保养|交付|到货)(?:周期|间隔)"
             + "|(?:故障)?(?:到场|到达|响应)(?:时限|耗时|时间)|(?:替换)?备件(?:保修|质保)期|(?:保修|质保)期";
     private static final String OBJECT = "[^，,。；;|：:]+?";
-    private static final String CONDITION = "(?:(?:在|于)?([^，,。；;|]{1,30}?)(?:下|内|时)?[，,]\\s*)?";
+    private static final String CONDITION = "(?:(?:在|于)?([^，,。；;|\\r\\n]{1,30}?)(?:下|内|时)?[，,]\\s*)?";
     private static final String PERIOD = "\\d{4}\\s*年(?:度|\\s*(?:[上下]半年|第?[一二三四1-4]季度|\\d{1,2}\\s*月))?";
     private static final String LIMIT = "不得超过|不超过|不得低于|不低于|至多|至少|不高于|不多于|不少于|"
             + "最高|最低|不小于|不大于|建议|约为|约|最多|最少";
@@ -41,10 +41,14 @@ final class AnchoredComparisonFacts {
     private static final Pattern OBJECT_FIRST = Pattern.compile("^" + CONDITION + "(" + OBJECT + ")\\s*(?:的)?("
             + ACTIVITY + ")\\s*前\\s*((?:" + MODAL + ")\\s*(?:先)?(?:" + POWER + "))[。.!！]?$");
     private static final Pattern TYPED_DIMENSION = Pattern.compile("(?:预算|经费|支出|开支)$|(?:" + DURATION_METRIC + ")$");
+    private static final Pattern PAGE_LAYOUT_PREFIX = Pattern.compile(
+            "^(?:(?:续页\\h+[^\\r\\n]+|[一二三四五六七八九十]+、[^，,。；;：:\\r\\n]+(?:要求|规定|规程|说明))\\R{2,})+(?=[在于])");
     private static final Pattern CHANGE_OF_SCOPE = Pattern.compile("或者|除非|如果|另外|否则|分别|但|另行");
     private static final Pattern FRAGMENT = Pattern.compile("[。！？!?；;|\\r\\n]+|(?<!\\d),|,(?!\\d)");
     private static final Pattern QUANTITY = Pattern.compile("(?<![\\d.,+−-])" + NUMBER + "\\s*"
             + "(?:" + MONEY + "|" + DURATION + "|千克|公斤|克|千米|公里|米|毫米|升|毫升|箱|件|台|%)(?![0-9]|[.,][0-9])");
+    private static final Pattern NO_NUMERIC_FACT = Pattern.compile(
+            "(?:没有|未(?:提供|记录|披露|注明|规定|给出)|不含)[^，,。；;！？!?]{0,24}$");
 
     private AnchoredComparisonFacts() {}
 
@@ -64,10 +68,23 @@ final class AnchoredComparisonFacts {
 
     static boolean possiblyRelevant(String dimension, String quote) {
         return switch (type(dimension)) {
-            case NUMERIC -> metricKey(quote).contains(metricKey(dimension));
+            case NUMERIC -> mentionsNumericMetric(metricKey(dimension), quote);
             case OBLIGATION -> metricKey(quote).contains("断电");
             case ANY -> true;
         };
+    }
+
+    private static boolean mentionsNumericMetric(String metric, String quote) {
+        String normalized = metricKey(quote);
+        int index = normalized.indexOf(metric);
+        if (index < 0) return false;
+        if (QUANTITY.matcher(Normalizer.normalize(quote, Normalizer.Form.NFKC)).find()) return true;
+        while (index >= 0) {
+            // 无法解析的数值仍可能是相关事实。只排除明确没有给出该指标的语句。
+            if (!NO_NUMERIC_FACT.matcher(normalized.substring(Math.max(0, index - 30), index)).find()) return true;
+            index = normalized.indexOf(metric, index + metric.length());
+        }
+        return false;
     }
 
     static Selection literal(ComparisonCellScope scope, Citation citation) {
@@ -75,7 +92,8 @@ final class AnchoredComparisonFacts {
         // An Excel anchor preserves the physical row, including labels next to a narrative cell.
         String[] parts = citation.cellLocation() == null ? new String[]{citation.quote()} : citation.quote().split("\\|");
         for (String part : parts) {
-            String text = part.strip();
+            // Page and section labels can precede the sentence in a complete original span.
+            String text = PAGE_LAYOUT_PREFIX.matcher(part.strip()).replaceFirst("");
             if (text.isBlank() || CHANGE_OF_SCOPE.matcher(text).find()) continue;
             ComparisonCandidate parsed = parse(citation, text, scope);
             if (parsed != null) recognized.add(new Selection(citation, parsed, true, text));
@@ -107,16 +125,16 @@ final class AnchoredComparisonFacts {
 
     static Selection draft(ComparisonCellScope scope, Citation citation, Type type, String object, String period,
                            String condition, String metric, String value, String unit) {
-        if (citation == null || !scope.permits(citation.quote())
-                || (type(scope.dimension()) != Type.ANY && type(scope.dimension()) != type)) return null;
+        if (citation == null || (type(scope.dimension()) != Type.ANY && type(scope.dimension()) != type)) return null;
         Selection literal = literal(scope, citation);
-        if (literal != null) return literal;
+        if (literal != null) return scope.equipmentScope(literal.candidate().object()).permitted() ? literal : null;
         if (metric == null || metric.isBlank() || value == null || value.isBlank()) return null;
         boolean inDimension = type(scope.dimension()) == Type.ANY || matches(scope.dimension(), metric)
                 || type == Type.OBLIGATION && powerDimension(scope.dimension(), metric)
                         && metricKey(value).contains("断电");
         if (!inDimension) return null;
         ComparisonCandidate candidate = candidate(citation, object, period, condition, metric, value, unit);
+        if (!scope.equipmentScope(candidate.object()).permitted()) return null;
         String quote = compact(citation.quote());
         if (!List.of(candidate.object(), candidate.period(), candidate.condition(), candidate.metric(), candidate.rawValue())
                 .stream().allMatch(field -> quote.contains(compact(field)))) return null;

@@ -7,13 +7,17 @@ import re
 import statistics
 import unicodedata
 from collections import Counter
+from datetime import date
 from xml.etree import ElementTree
 
-from trace_report_release_gate import ANCHORED_VARIANT, VARIANTS, load_gold, read_json, save_json, sha256
+from trace_report_release_gate import ANCHORED_VARIANT, EXAM_CORPUS, VARIANTS, load_gold, read_json, save_json, sha256
 
 
+EXPANDED_REPORTS = {"warehouse": 4, "backup": 4, "notice": 4}
+EXPANDED_COMPARISONS = {"maintenance": (4, 2), "procurement": (4, 2), "service": (4, 2), "scope": (1, 1)}
+EXPANDED_COUNTS = {**{case: (total, 0) for case, total in EXPANDED_REPORTS.items()}, **EXPANDED_COMPARISONS}
 CORE = {"real": {"full-document"}, "long": {"equipment-report", "agreement-long", "equipment-compare"},
-        "expanded": {"maintenance", "procurement", "service", "scope"}}
+        "expanded": set(EXPANDED_COUNTS)}
 GUARDS = {"rejectsWrongRank", "rejectsWrongTableColumn", "rejectsWrongObject", "rejectsWrongUnit",
           "rejectsRecommendationAsRequirement"}
 ANCHOR_GUARDS = {"exposesOnlyWorksheetCellsAndPersistsTheirPhysicalRange",
@@ -30,6 +34,13 @@ REASON_CHECKS = {
     "NOT_FOUND": (r"未找到.{0,6}(?:依据|证据)|证据不足|没有.{0,6}(?:依据|证据)",),
 }
 CONDITION_CHECKS = {"故障到场时限": (r"工作日", r"节假日"), "到场时限": (r"寒潮", r"常温")}
+SCOPE_EXCLUSION = {equipment: re.compile(
+    rf'排除(?:的)?[「『“"(]*{equipment}(?![a-z0-9_-])|'
+    rf'{equipment}(?![a-z0-9_-])(?:号)?(?:货梯)?[」』”")]*,?'
+    r'(?:被(?:明确)?排除|(?:不在|不属于|超出)[^,。；;]{0,12}范围)') for equipment in ("z8", "z9")}
+DENIED_SCOPE_EXCLUSION = re.compile(r'(?:没有|并未|未|不得|不应当?|不能|无须)(?:明确)?排除(?:的)?[「『“"(]*z9(?![a-z0-9_-])')
+FAILED_COMPARISON = re.compile(r"(?:检索|提取).{0,8}(?:失败|超时)|未能完成.{0,8}(?:检索|提取)")
+NATIVE_TEXT_SPAN = re.compile(r"(PDF 页内字符|原文字符) \[([0-9]+),([0-9]+)\)(?:（表[0-9]+）)?")
 logging.getLogger("pypdf").setLevel(logging.ERROR)
 
 
@@ -57,15 +68,29 @@ def document_text(path):
     if path.suffix == ".docx":
         from docx import Document
         return ["\n".join(paragraph.text for paragraph in Document(path).paragraphs)]
-    if path.suffix == ".xlsx":
-        from openpyxl import load_workbook
-        workbook = load_workbook(path, data_only=True, read_only=True)
-        try:
-            return ["".join(str(value) for value in row if value is not None)
-                    for sheet in workbook for row in sheet.values]
-        finally:
-            workbook.close()
-    return [path.read_text(encoding="utf-8-sig")]
+    return [path.read_bytes().decode("utf-8")]
+
+
+def worksheet_rows(path):
+    from openpyxl import load_workbook
+    from openpyxl.utils import get_column_letter
+
+    def cell_text(value):
+        if value is None:
+            return ""
+        if isinstance(value, date):
+            return value.isoformat()[:10]
+        if isinstance(value, float) and value.is_integer():
+            value = int(value)
+        return str(value).strip().replace("|", "｜").replace("\n", " ")
+
+    workbook = load_workbook(path, data_only=True, read_only=True)
+    try:
+        return {f"{sheet.title}!A{number}:{get_column_letter(len(row))}{number}":
+                "| " + " | ".join(cell_text(value) for value in row) + " |"
+                for sheet in workbook for number, row in enumerate(sheet.values, start=1) if row}
+    finally:
+        workbook.close()
 
 
 class Sources:
@@ -73,28 +98,58 @@ class Sources:
         self.names = {value["id"]: name for name, value in documents.items()}
         self.chunks = {chunk["chunkId"]: chunk for value in documents.values() for chunk in value["chunks"]}
         self.pages = {}
+        self.worksheets = {}
         for name, indexed in documents.items():
             path = corpus / "fixtures" / name
             if sha256(path.read_bytes()) != gold["sha256"][name] or indexed["sha256"] != gold["sha256"][name]:
                 raise ValueError(f"Indexed input differs from frozen fixture: {name}")
-            self.pages[name] = document_text(path)
+            if path.suffix == ".xlsx":
+                self.worksheets[name] = worksheet_rows(path)
+            else:
+                self.pages[name] = document_text(path)
 
     def locate(self, evidence, allowed):
         document = self.names.get(evidence.get("documentId"))
         chunk = self.chunks.get(evidence.get("chunkId"))
-        quote = compact(evidence.get("quote"))
+        raw_quote = evidence.get("quote")
+        quote = compact(raw_quote)
         if (evidence.get("sourceStatus") != "MATCHED" or not quote or document not in allowed
                 or evidence.get("fileName") != document or not chunk or chunk["documentId"] != evidence["documentId"]
                 or chunk["chunkIndex"] != evidence.get("chunkIndex") or quote not in compact(chunk["content"])):
             return None
+        text_hash = evidence.get("textHash")
+        if text_hash is not None and text_hash != sha256(chunk["content"].encode("utf-8")):
+            return None
+        native = evidence.get("nativeLocation")
+        if native is not None and not isinstance(native, str):
+            return None
+        if document.endswith(".xlsx"):
+            rows = self.worksheets[document]
+            if native is not None:
+                row = rows.get(native)
+                sheet = native.rpartition("!")[0]
+                right_sheet = chunk.get("section") in (None, sheet)
+                return document if row is not None and right_sheet and quote == compact(row) else None
+            # Legacy snapshots do not record a native worksheet address.
+            return document if any(quote.replace("|", "") in compact(row).replace("|", "") for row in rows.values()) else None
         page = evidence.get("pageStart")
         blocks = self.pages[document]
-        if document.endswith(".pdf"):
+        pdf = document.endswith(".pdf")
+        if pdf:
             if not isinstance(page, int) or not 1 <= page <= len(blocks) or page != evidence.get("pageEnd") or page != chunk.get("pageStart"):
                 return None
             blocks = [blocks[page - 1]]
-        if document.endswith(".xlsx"):
-            quote = quote.replace("|", "")
+        if native is not None:
+            match = NATIVE_TEXT_SPAN.fullmatch(native)
+            if not match or match[1] != ("PDF 页内字符" if pdf else "原文字符"):
+                return None
+            start, end = int(match[2]), int(match[3])
+            quote_bytes = raw_quote.encode("utf-16-le")
+            if (end - start) * 2 != len(quote_bytes):
+                return None
+            # Plain text has the same native layout in both extractors. PDFBox and pypdf offsets can differ.
+            if document.endswith(".txt") and blocks[0].encode("utf-16-le")[start * 2:end * 2] != quote_bytes:
+                return None
         return document if any(quote in compact(block) for block in blocks) else None
 
 
@@ -109,13 +164,21 @@ def read_log(path):
     return records
 
 
+def latest_attempts(events):
+    return {(event.get("section"), event.get("batch")): event for event in events}.values()
+
+
 def context_coverage(facts, records, sources, case=None, split=False, phase="context"):
-    if not records or not any(record["phase"] == phase for record in records):
+    events = [record for record in records if record["phase"] == phase]
+    if not events:
         return None
+    scoped = phase == "anchors" and case and case["type"] == "REPORT" and any(
+        "question" in selected for event in events for selected in event["selected"])
+    if scoped:
+        # Log order is attempt order. A retry replaces the initial offer, even if the retry offered no spans.
+        events = latest_attempts(events)
     contexts = []
-    for record in records:
-        if record["phase"] != phase:
-            continue
+    for record in events:
         for selected in record["selected"]:
             chunk = sources.chunks.get(selected["chunkId"])
             if not chunk or chunk["documentId"] != selected["documentId"]:
@@ -127,7 +190,7 @@ def context_coverage(facts, records, sources, case=None, split=False, phase="con
             if start < 0 or end > len(encoded) or end < start:
                 raise ValueError(f"Invalid context span in {record['taskId']}: {selected['chunkId']}")
             visible = encoded[start:end].decode("utf-16-le")
-            contexts.append((record.get("section"), record.get("batch"), sources.names[chunk["documentId"]],
+            contexts.append((record.get("section"), record.get("batch"), selected.get("question"), sources.names[chunk["documentId"]],
                              chunk.get("pageStart"), visible))
     found = 0
     for index, fact in enumerate(facts):
@@ -136,12 +199,16 @@ def context_coverage(facts, records, sources, case=None, split=False, phase="con
         if case and case["type"] == "COMPARE":
             expected_section = case["dimensions"].index(fact["dimension"]) + 1
             expected_batch = case["documents"].index(fact["document"]) + 1
+        elif scoped:
+            expected_section = 1  # The benchmark submits a single findings section for each report.
+            expected_batch = index // 4 + 1
         elif split and len(facts) > 4:
             expected_batch = index // 4 + 1
         found += any(name == fact["document"] and proves(fact, page, content)
                      and (expected_section is None or section == expected_section)
                      and (expected_batch is None or batch == expected_batch)
-                     for section, batch, name, page, content in contexts)
+                     and (not scoped or question == index % 4 + 1)
+                     for section, batch, question, name, page, content in contexts)
     return found
 
 
@@ -204,12 +271,18 @@ def score_decisions(case, matrix, cells, matches):
             candidates = [cell] if cell else []
             category = cell.get("status") == kind and not cell.get("facts")
             reason = category and reason_matches(expected, cell.get("reason"))
+            if case.get("id") == "scope":
+                text = compact(cell.get("reason"))
+                reason = (category and cell.get("reasonCode") in (None, "OUTSIDE_SCOPE")
+                          and bool(SCOPE_EXCLUSION["z9"].search(text)) and not SCOPE_EXCLUSION["z8"].search(text)
+                          and not DENIED_SCOPE_EXCLUSION.search(text) and not FAILED_COMPARISON.search(text))
         else:
             labels = [matches[label] for label in expected["facts"]]
             candidates = [item for item in matrix.get("conclusions", []) if item["dimension"] == dimension
-                          and item["kind"] != "KEY_DATA" and all(choice.intersection(item["claimIds"]) for choice in labels)]
+                          and item["kind"] != "KEY_DATA"]
+            grounded = [item for item in candidates if all(choice.intersection(item["claimIds"]) for choice in labels)]
             category = {item["kind"] for item in candidates} == {kind}
-            reason = category and all(correct_reason(expected, item) for item in candidates)
+            reason = category and bool(grounded) and all(correct_reason(expected, item) for item in grounded)
         decisions.append({"dimension": dimension, "expected": kind, "categoryCorrect": category,
                           "reasonCorrect": reason, "observed": candidates})
     return decisions
@@ -220,22 +293,39 @@ def measure(case, directory, sources, log, variant):
     if not outcome_path.exists():
         return None
     outcome = read_json(outcome_path)
+    report = None
+    if outcome["status"] == "COMPLETED":
+        report_path = directory / "report.json"
+        if not report_path.is_file():
+            return None
+        report = read_json(report_path)
+        if (report.get("schemaVersion") != "v2" or not report.get("sections")
+                or not all(isinstance(report.get(field), list) for field in ("sections", "evidenceSnapshots"))):
+            return None
     facts = case["facts"]
     events = log.get(outcome["taskId"], [])
     split = variant in ("question-split", "full", ANCHORED_VARIANT)
     retrieved_hits = context_coverage(facts, events, sources, case, split)
     visible_hits = (context_coverage(facts, events, sources, case, split, phase="anchors")
                     if variant == ANCHORED_VARIANT else retrieved_hits)
+    anchors = latest_attempts(event for event in events if event["phase"] == "anchors")
+    numbered_anchors = bool(anchors) and all(event["selected"] and all(
+        type(span.get("question")) is int and 1 <= span["question"] <= 4 for span in event["selected"]
+    ) for event in anchors)
     result = {**outcome, "contextHits": visible_hits, "retrievedHits": retrieved_hits,
+              "numberedAnchors": numbered_anchors,
               "factsPassed": 0, "factsTotal": len(facts),
-              "decisionsPassed": 0, "decisionsTotal": len(case["decisions"]), "invalidSupported": 0,
+              "decisionsPassed": 0, "decisionCategoriesPassed": 0, "notFoundPassed": 0,
+              "decisionsTotal": len(case["decisions"]),
+              "citationsLocated": 0, "citationsTotal": 0, "invalidSupported": 0,
               "phaseOutcomes": dict(Counter(f"{event['phase']}/{event['outcome']}" for event in events))}
-    if outcome["status"] != "COMPLETED":
+    if report is None:
         return result
-    report = read_json(directory / "report.json")
     claims = claims_by_id(report)
     snapshots = {value["evidenceId"]: value for value in report["evidenceSnapshots"]}
-    located = {key: sources.locate(evidence, set(case["documents"])) for key, evidence in snapshots.items()}
+    allowed = set(case["documents"])
+    located = {key: sources.locate(evidence, allowed) for key, evidence in snapshots.items()
+               if compact(evidence.get("quote"))}
     matrix = report.get("comparison") or {}
     cells, structured = coordinates(matrix, sources)
     matches = {fact["id"]: {claim_id for claim_id, claim in claims.items()
@@ -250,6 +340,8 @@ def measure(case, directory, sources, log, variant):
                    and wrong_ecology_rank.search(compact(claim["text"])))
     result.update(factsPassed=sum(bool(values) for values in matches.values()),
                   matchingClaims={key: sorted(values) for key, values in matches.items()},
+                  decisionCategoriesPassed=sum(item["categoryCorrect"] for item in decisions),
+                  notFoundPassed=sum(item["categoryCorrect"] for item in decisions if item["expected"] == "NOT_FOUND"),
                   decisionsPassed=sum(item["reasonCorrect"] for item in decisions), decisions=decisions,
                   citationsLocated=sum(value is not None for value in located.values()), citationsTotal=len(located),
                   invalidSupported=len(set(invalid)), invalidClaimIds=sorted(set(invalid)))
@@ -273,7 +365,7 @@ def percentile95(values):
     return sorted(values)[math.ceil(len(values) * .95) - 1] if values else None
 
 
-def collect_variant(output, corpora, gold, variant):
+def collect_variant(output, corpora, gold, variant, only=None):
     directory = output / variant
     metadata = directory / "run.json"
     if not metadata.exists():
@@ -281,11 +373,13 @@ def collect_variant(output, corpora, gold, variant):
     run = read_json(metadata)
     if run["variant"] != variant:
         raise ValueError(f"Incorrect variant in {metadata}")
-    if run["goldHashes"] != {name: sha256((path / "gold.json").read_bytes()) for name, path in corpora.items()}:
+    selected = corpora if only is None else {name: corpora[name] for name in only}
+    hashes = run["goldHashes"] if only is None else {name: run["goldHashes"].get(name) for name in only}
+    if hashes != {name: sha256((path / "gold.json").read_bytes()) for name, path in selected.items()}:
         raise ValueError(f"Frozen corpus labels changed since {metadata} was written")
     observed = {}
     logs = read_log(directory / "retrieval.jsonl")
-    for name, source_dir in corpora.items():
+    for name, source_dir in selected.items():
         registry = directory / name / "documents.json"
         if not registry.exists():
             continue
@@ -306,50 +400,158 @@ def aggregate(measurements, corpus, cases, field):
     return {"runs": values, "median": None if None in values else statistics.median(values)}
 
 
-def compare_revision_runs(before, after, expected, short):
+def valid_counts(row, total_field, expected, *count_fields):
+    total = row.get(total_field)
+    return (type(total) is int and total >= 0 and (expected is None or total == expected)
+            and all(type(row.get(field)) is int and 0 <= row[field] <= total for field in count_fields))
+
+
+def completed_run(row, key):
+    if row.get("status") != "COMPLETED":
+        return False
+    corpus, case, _ = key.split("/")
+    if corpus == EXAM_CORPUS:
+        return valid_counts(row, "factsTotal", 8, "factsPassed")
+    if corpus != "expanded":
+        return True
+    if case not in EXPANDED_COUNTS:
+        return False
+    facts, decisions = EXPANDED_COUNTS[case]
+    return (valid_counts(row, "factsTotal", facts, "factsPassed")
+            and valid_counts(row, "decisionsTotal", decisions, "decisionsPassed", "decisionCategoriesPassed")
+            and row["decisionsPassed"] <= row["decisionCategoriesPassed"]
+            and valid_counts(row, "citationsTotal", None, "citationsLocated"))
+
+
+def expanded_metrics(measurements):
+    completed = {key: row for key, row in measurements.items() if key.startswith("expanded/") and completed_run(row, key)}
+    metrics = {}
+    for name, cases, field, total in (
+        ("expandedRecall", EXPANDED_COUNTS, "contextHits", 25),
+        ("expandedGrounded", EXPANDED_COUNTS, "factsPassed", 25),
+        ("expandedReportGrounded", EXPANDED_REPORTS, "factsPassed", 12),
+        ("expandedCompareGrounded", EXPANDED_COMPARISONS, "factsPassed", 13),
+        ("expandedDecisionCategories", EXPANDED_COMPARISONS, "decisionCategoriesPassed", 7),
+        ("expandedDecisions", EXPANDED_COMPARISONS, "decisionsPassed", 7),
+        ("expandedNotFound", {"scope"}, "notFoundPassed", 1),
+    ):
+        metric = aggregate(completed, "expanded", cases, field)
+        median = metric["median"]
+        metrics[name] = {**metric, "totalPerRun": total, "medianRate": None if median is None else median / total}
+    located = aggregate(completed, "expanded", EXPANDED_COUNTS, "citationsLocated")["runs"]
+    totals = aggregate(completed, "expanded", EXPANDED_COUNTS, "citationsTotal")["runs"]
+    rates = [hits / total if hits is not None and total else None for hits, total in zip(located, totals)]
+    pooled_located = None if None in located else sum(located)
+    pooled_total = None if None in totals else sum(totals)
+    metrics["expandedCitationLocation"] = {"located": located, "totals": totals, "runs": rates,
+                                           "median": None if None in rates else statistics.median(rates),
+                                           "pooledLocated": pooled_located, "pooledTotal": pooled_total,
+                                           "pooledRate": (pooled_located / pooled_total
+                                                          if pooled_located is not None and pooled_total else None)}
+    return metrics
+
+
+def exam_metrics(measurements):
+    valid = {key: row for key, row in measurements.items() if key.startswith(f"{EXAM_CORPUS}/")
+             and completed_run(row, key)}
+    return {name: {**aggregate(valid, EXAM_CORPUS, {EXAM_CORPUS}, field), "totalPerRun": 8}
+            for name, field in (("examCheckCoverage", "contextHits"), ("examCheckGrounded", "factsPassed"))}
+
+
+def quality_checks(metrics):
+    checks = {}
+    for name, minimum in {"realRecall": 8, "realGrounded": 6, "longRecall": 18, "longGrounded": 12,
+                          "expandedReportGrounded": 9, "expandedCompareGrounded": 10, "expandedDecisions": 4}.items():
+        median = metrics[name]["median"]
+        checks[name] = median is not None and median >= minimum
+    citations = metrics["expandedCitationLocation"]
+    checks["expandedCitationLocation"] = (all(total is not None and total > 0 for total in citations["totals"])
+                                          and 100 * citations["pooledLocated"] >= 95 * citations["pooledTotal"])
+    if "examCheckCoverage" in metrics:
+        checks["examCheckCoverage"] = metrics["examCheckCoverage"]["runs"] == [8, 8, 8]
+    return checks
+
+
+def supports_are_locatable(rows, expected):
+    return bool(expected) and all(rows.get(key, {}).get("status") == "COMPLETED"
+                                  and rows[key].get("invalidSupported") == 0 for key in expected)
+
+
+def paired_timing(reference, candidate, short):
+    def timed(row):
+        seconds = row.get("seconds")
+        return (row.get("status") == "COMPLETED" and row.get("timingReliable", True)
+                and type(seconds) in (int, float) and math.isfinite(seconds) and seconds > 0)
+
+    paired = {key for key in short if timed(reference.get(key, {})) and timed(candidate.get(key, {}))}
+    before = percentile95([reference[key]["seconds"] for key in paired])
+    after = percentile95([candidate[key]["seconds"] for key in paired])
+    return {"beforeSeconds": before, "afterSeconds": after, "matchedSuccessful": len(paired), "expected": len(short)}
+
+
+def timing_passes(timing):
+    return (timing["matchedSuccessful"] == timing["expected"] and timing["beforeSeconds"] is not None
+            and timing["afterSeconds"] <= timing["beforeSeconds"] * 2)
+
+
+def compare_revision_runs(before, after, expected, short, latency_reference=None):
     before_rows = before["measurements"] if before else {}
     after_rows = after["measurements"] if after else {}
     settings = [{k: v for k, v in run["settings"].items() if k != "variant"} for run in (before, after) if run]
-    paired = {key for key in short
-              if before_rows.get(key, {}).get("status") == after_rows.get(key, {}).get("status") == "COMPLETED"
-              and before_rows[key].get("timingReliable", True) and after_rows[key].get("timingReliable", True)}
-    before_p95 = percentile95([before_rows[key]["seconds"] for key in paired])
-    after_p95 = percentile95([after_rows[key]["seconds"] for key in paired])
-    metrics = {}
-    for name, corpus, field in (
-        ("realRecall", "real", "contextHits"), ("realRetrieved", "real", "retrievedHits"),
-        ("realGrounded", "real", "factsPassed"),
-        ("longRecall", "long", "contextHits"), ("longRetrieved", "long", "retrievedHits"),
-        ("longGrounded", "long", "factsPassed"),
-        ("expandedRecall", "expanded", "contextHits"), ("expandedGrounded", "expanded", "factsPassed"),
-        ("expandedDecisions", "expanded", "decisionsPassed"),
-    ):
-        metrics[name] = {
-            "before": aggregate(before_rows, corpus, CORE[corpus], field),
-            "after": aggregate(after_rows, corpus, CORE[corpus], field),
-        }
+    revision_timing = paired_timing(before_rows, after_rows, short)
+    gate_timing = (revision_timing if latency_reference is None
+                   else paired_timing(latency_reference.get("measurements", {}), after_rows, short))
+    details = {}
+    for label, rows in (("before", before_rows), ("after", after_rows)):
+        details[label] = {name: aggregate(rows, corpus, CORE[corpus], field) for name, corpus, field in (
+            ("realRecall", "real", "contextHits"), ("realRetrieved", "real", "retrievedHits"),
+            ("realGrounded", "real", "factsPassed"),
+            ("longRecall", "long", "contextHits"), ("longRetrieved", "long", "retrievedHits"),
+            ("longGrounded", "long", "factsPassed"),
+        )}
+        details[label].update(expanded_metrics(rows))
+        if any(key.startswith(f"{EXAM_CORPUS}/") for key in expected):
+            details[label].update(exam_metrics(rows))
     checks = {"sameInputsAndModels": len(settings) == 2 and settings[0] == settings[1],
-              "allSelectedRunsPaired": expected.issubset(before_rows) and expected.issubset(after_rows),
-              "shortTaskP95": paired == short and before_p95 is not None and after_p95 <= before_p95 * 2,
-              "unsupportedClaims": bool(after_rows) and all(not row["invalidSupported"] for row in after_rows.values())}
-    for name, minimum in {"realRecall": 8, "realGrounded": 6, "longRecall": 18,
-                          "longGrounded": 12, "expandedDecisions": 4}.items():
-        median = metrics[name]["after"]["median"]
-        checks[name] = median is not None and median >= minimum
+              "allSelectedRunsPaired": bool(expected) and all(completed_run(rows.get(key, {}), key)
+                                                            for rows in (before_rows, after_rows) for key in expected),
+              "shortTaskP95": timing_passes(gate_timing),
+              "unsupportedClaims": supports_are_locatable(after_rows, expected), **quality_checks(details["after"])}
+    exam_runs = {key for key in expected if key.startswith(f"{EXAM_CORPUS}/")}
+    if exam_runs:
+        checks["examQuestionAnchors"] = all(after_rows.get(key, {}).get("numberedAnchors") is True for key in exam_runs)
+    metrics = {name: {label: values[name] for label, values in details.items()} for name in details["after"]}
     return {"checks": checks, "metrics": metrics,
-            "shortTaskP95": {"beforeSeconds": before_p95, "afterSeconds": after_p95,
-                             "matchedSuccessful": len(paired), "expected": len(short)},
+            "shortTaskP95": gate_timing, "revisionShortTaskP95": revision_timing,
             "before": before, "after": after,
             "missingBefore": sorted(expected - before_rows.keys()), "missingAfter": sorted(expected - after_rows.keys())}
 
 
 def summarize_revisions(args, corpora):
     gold = {name: load_gold(source) for name, source in corpora.items()}
-    before = collect_variant(args.before_output, corpora, gold, "full")
-    after = collect_variant(args.output, corpora, gold, ANCHORED_VARIANT)
-    short = {f"expanded/{case['id']}/{rep}" for case in gold["expanded"]["runs"] for rep in range(1, 4)}
-    expected = short | {f"{name}/{case}/{rep}" for name in ("real", "long") for case in CORE[name] for rep in range(1, 4)}
-    result = compare_revision_runs(before, after, expected, short)
+    same_strategy = args.before_variant == ANCHORED_VARIANT
+    exam_configured = EXAM_CORPUS in gold
+    # Record the missing exam setup even when the saved runs also include that corpus.
+    selected = set(corpora) if same_strategy and not exam_configured else None
+    before = collect_variant(args.before_output, corpora, gold, args.before_variant, only=selected)
+    after = collect_variant(args.output, corpora, gold, ANCHORED_VARIANT, only=selected)
+    short = {f"expanded/{case}/{rep}" for case in EXPANDED_COUNTS for rep in range(1, 4)}
+    expected = {f"{name}/{case}/{rep}" for name, cases in CORE.items() for case in cases for rep in range(1, 4)}
+    if exam_configured:
+        expected.update(f"{EXAM_CORPUS}/{EXAM_CORPUS}/{rep}" for rep in range(1, 4))
+    archived = None
+    if args.latency_reference_output is not None:
+        archived = collect_variant(args.latency_reference_output, corpora, gold, "full", only={"expanded"}) or {}
+    result = compare_revision_runs(before, after, expected, short, archived)
+    if same_strategy:
+        result["checks"].update(examCorpusConfigured=exam_configured,
+                                archivedLatencyConfigured=args.latency_reference_output is not None)
+    if archived is not None:
+        result["checks"]["archivedLatencyModels"] = bool(archived and after) and all(
+            archived["settings"].get(key) == after["settings"].get(key) for key in ("model", "embedding"))
+        result["shortTaskP95"]["referenceVariant"] = "full"
+    else:
+        result["shortTaskP95"]["referenceVariant"] = args.before_variant
     proof = passing_tests(args.guardrail_proof)
     result["checks"].update(negativeFixtures=(GUARDS | ANCHOR_GUARDS).issubset(proof),
                             generationAndRetrievalFailures=STABILITY.issubset(proof),
@@ -357,7 +559,8 @@ def summarize_revisions(args, corpora):
     result["passed"] = all(result["checks"].values())
     save_json(args.output / "revision-comparison.json", result)
     for name, values in result["metrics"].items():
-        print(f"{name}: {values['before']['median']} -> {values['after']['median']}")
+        field = "pooledRate" if name == "expandedCitationLocation" else "median"
+        print(f"{name}: {values['before'][field]} -> {values['after'][field]}")
     for name, passed in result["checks"].items():
         print(f"{name}: {'PASS' if passed else 'FAIL OR INCOMPLETE'}")
     return 0 if result["passed"] else 1
@@ -373,8 +576,10 @@ def summarize(args, corpora):
         result["medianMetrics"] = {
             key: aggregate(runs, corpus, CORE[corpus], field) for key, corpus, field in (
                 ("realRecall", "real", "contextHits"), ("realGrounded", "real", "factsPassed"),
-                ("longRecall", "long", "contextHits"), ("longGrounded", "long", "factsPassed"),
-                ("expandedDecisions", "expanded", "decisionsPassed"))}
+                ("longRecall", "long", "contextHits"), ("longGrounded", "long", "factsPassed"))}
+        result["medianMetrics"].update(expanded_metrics(runs))
+        if EXAM_CORPUS in gold:
+            result["medianMetrics"].update(exam_metrics(runs))
         result["caseMedians"] = {
             f"{name}/{case['id']}": {
                 field: aggregate(runs, name, {case["id"]}, field)
@@ -393,33 +598,33 @@ def summarize(args, corpora):
     expected_cases = {f"{name}/{case['id']}/{repetition}" for name, labels in gold.items()
                       for case in labels["runs"] for repetition in range(1, 4)}
     short = {key for key in expected_cases if key.startswith("expanded/")}
-    successful = {key for key in short if base_runs.get(key, {}).get("status") == full_runs.get(key, {}).get("status") == "COMPLETED"
-                  and base_runs[key].get("timingReliable", True) and full_runs[key].get("timingReliable", True)}
-    base_p95 = percentile95([base_runs[key]["seconds"] for key in successful])
-    full_p95 = percentile95([full_runs[key]["seconds"] for key in successful])
+    timing = paired_timing(base_runs, full_runs, short)
     same_inputs = [{key: value for key, value in item["settings"].items() if key != "variant"}
                    for item in variants.values() if item is not None]
     proof = passing_tests(args.guardrail_proof)
     checks = {
-        "allVariantsRanThreeTimes": all(v is not None and set(v["measurements"]) == expected_cases for v in variants.values()),
+        "allVariantsRanThreeTimes": all(v is not None and all(completed_run(v["measurements"].get(key, {}), key)
+                                                             for key in expected_cases) for v in variants.values()),
         "sameInputsAndModels": len(same_inputs) == len(VARIANTS) and all(item == same_inputs[0] for item in same_inputs),
-        "shortTaskP95": successful == short and base_p95 is not None and full_p95 <= base_p95 * 2,
-        "unsupportedClaims": bool(full_runs) and all(not row["invalidSupported"] for row in full_runs.values()),
+        "shortTaskP95": timing_passes(timing),
+        "unsupportedClaims": supports_are_locatable(full_runs, expected_cases),
         "negativeFixtures": GUARDS.issubset(proof),
         "generationAndRetrievalFailures": STABILITY.issubset(proof),
         "legacyReadAndReexport": HISTORY.issubset(passing_tests(args.compatibility_proof)),
     }
-    for key, target in {"realRecall": 8, "realGrounded": 6, "longRecall": 18,
-                        "longGrounded": 12, "expandedDecisions": 4}.items():
-        median = full["medianMetrics"][key]["median"] if full else None
-        checks[key] = median is not None and median >= target
+    empty_metrics = {**dict.fromkeys(("realRecall", "realGrounded", "longRecall", "longGrounded"), {"median": None}),
+                     **expanded_metrics({})}
+    if EXAM_CORPUS in gold:
+        empty_metrics.update(exam_metrics({}))
+    checks.update(quality_checks(full["medianMetrics"] if full else empty_metrics))
     result = {"passed": all(checks.values()), "checks": checks, "variants": variants,
-              "shortTaskP95": {"baselineSeconds": base_p95, "fullSeconds": full_p95,
-                               "matchedSuccessful": len(successful), "expected": len(short)}}
+              "shortTaskP95": {"baselineSeconds": timing["beforeSeconds"], "fullSeconds": timing["afterSeconds"],
+                               "matchedSuccessful": timing["matchedSuccessful"], "expected": timing["expected"]}}
     save_json(args.output / "summary.json", result)
     for name, variant in variants.items():
         if variant:
-            medians = ", ".join(f"{key}={value['median']}" for key, value in variant["medianMetrics"].items())
+            medians = ", ".join(f"{key}={value.get('pooledRate', value['median'])}"
+                                for key, value in variant["medianMetrics"].items())
             print(f"{name}: {len(variant['measurements'])} observed tasks, {variant['failures']} failed, {medians}")
     for check, passed in checks.items():
         print(f"{check}: {'PASS' if passed else 'FAIL OR INCOMPLETE'}")

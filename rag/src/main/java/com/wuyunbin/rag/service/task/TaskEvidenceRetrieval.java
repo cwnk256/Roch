@@ -49,17 +49,18 @@ public class TaskEvidenceRetrieval {
 
     record Questions(List<String> items, String scope) {}
 
-    record Supplement(List<RetrievedChunk> selected, int candidateCount) {}
+    record Supplement(List<RetrievedChunk> selected, int candidateCount, List<List<String>> matchesByQuestion) {}
 
     Supplement supplement(List<String> queries, List<RetrievedChunk> original, Set<String> scope, int budget) {
         int remaining = budget - original.stream().mapToInt(chunk -> chunk.content().length()).sum();
-        if (remaining <= 0 || scope.isEmpty()) return new Supplement(original, 0);
+        List<List<String>> matchesByQuestion = new ArrayList<>(Collections.nCopies(queries.size(), List.of()));
+        if (remaining <= 0 || scope.isEmpty()) return new Supplement(original, 0, List.copyOf(matchesByQuestion));
         Map<String, RetrievedChunk> selected = new LinkedHashMap<>();
         original.forEach(chunk -> selected.put(chunk.chunkId(), chunk));
         int candidateCount = 0;
-        for (String query : queries) {
+        for (int question = 0; question < queries.size(); question++) {
             if (remaining <= 0) break;
-            var anchor = reportAnchor(query);
+            var anchor = reportAnchor(queries.get(question));
             if (anchor == null) continue;
             List<AnchoredPassage> candidates = new ArrayList<>();
             for (DocumentChunkEntity row : chunkRepository.searchReportAnchors(anchor.keywordQuery(), scope,
@@ -76,11 +77,12 @@ public class TaskEvidenceRetrieval {
                 int size = additions.stream().mapToInt(chunk -> chunk.content().length()).sum();
                 if (size > remaining) continue;
                 additions.forEach(chunk -> selected.put(chunk.chunkId(), chunk));
+                matchesByQuestion.set(question, match.chunks().stream().map(RetrievedChunk::chunkId).toList());
                 remaining -= size;
                 break;
             }
         }
-        return new Supplement(List.copyOf(selected.values()), candidateCount);
+        return new Supplement(List.copyOf(selected.values()), candidateCount, List.copyOf(matchesByQuestion));
     }
 
     private record ReportAnchor(String keywordQuery, String tableNumber, List<String> leadingTerms,

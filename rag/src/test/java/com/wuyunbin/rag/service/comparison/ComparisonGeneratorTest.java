@@ -82,6 +82,125 @@ class ComparisonGeneratorTest {
         verifyNoInteractions(extractor);
     }
 
+    @Test void anchoredFixedIntervalsIgnorePageHeadersWhilePreservingQuotes() {
+        var task = anchoredTask("对照 C7 压缩机在干燥车间的固定巡检周期。", "固定巡检周期");
+        String cycleA = "续页　北岸设备维护规程甲\n\n二、巡检要求\n\n在干燥车间内，C7 压缩机的固定巡检周期为 14 天。";
+        String cycleB = "在干燥车间内，C7 压缩机的固定巡检周期为 28 天。";
+        anchoredDocuments(Map.of("A", List.of(cycleA), "B", List.of(cycleB)));
+
+        var report = generator.generate(task, 8, .5);
+        var comparison = report.comparison();
+        var leftFact = comparison.rows().getFirst().cells().getFirst().facts().getFirst();
+        assertEquals("干燥车间", leftFact.condition());
+        assertEquals(cycleA, leftFact.quote());
+        var pair = comparison.conclusions().stream().filter(conclusion -> conclusion.claimIds().size() == 2)
+                .findFirst().orElseThrow();
+        assertEquals(Kind.POSSIBLE_CONFLICT, pair.kind());
+        assertEquals(ReasonCode.FIXED_VALUE_CONFLICT, pair.reasonCode());
+        assertTrue(pair.text().contains(cycleA) && pair.text().contains(cycleB));
+        new EvidenceIntegrityValidator().validate(report, Set.of("A", "B"));
+    }
+
+    @Test void anchoredScopeReportsExcludedObjectFromTheMatchingOriginal() {
+        var task = anchoredTask("只核对北库常温区的货梯检修周期。", "固定检修周期",
+                new DocumentTaskRequest.SectionSelection("matrix", "只纳入 Z8 货梯。明确排除 Z9 货梯。"));
+        anchoredDocuments(Map.of("A", List.of("在北库常温区，Z8 货梯的固定检修周期为 15 天。"), "B", List.of(
+                "在北库常温区，Z9 货梯的固定检修周期为 7 天。",
+                "Z8 货梯由设施组协调。", "本记录没有其他货梯的检修周期。")));
+
+        var comparison = generator.generate(task, 8, .5).comparison();
+        var cells = comparison.rows().getFirst().cells();
+
+        assertEquals(List.of(Status.FOUND, Status.NOT_FOUND), cells.stream().map(Cell::status).toList());
+        var excluded = cells.getLast();
+        assertEquals(ReasonCode.OUTSIDE_SCOPE, excluded.reasonCode());
+        assertTrue(excluded.reason().contains("明确排除的「Z9 货梯」") && excluded.reason().contains("仅纳入 Z8"),
+                excluded.reason());
+        assertTrue(excluded.facts().isEmpty());
+        assertTrue(comparison.conclusions().stream().noneMatch(conclusion -> conclusion.claimIds().size() > 1));
+        verifyNoInteractions(extractor);
+    }
+
+    @Test void anchoredEmptyModelExtractionDoesNotEstablishAbsence() {
+        var task = anchoredTask("对照故障到场时限。", "故障到场时限");
+        anchoredDocuments(Map.of("A", List.of("北湖园区承诺故障到场时限至多 6 小时。"),
+                "B", List.of("本段仅记录替换备件保修期为 18 个月。")));
+        when(extractor.extractAnchored(any(), any())).thenReturn(
+                new ComparisonExtractor.AtomicExtraction(List.of(), List.of()));
+
+        var comparison = generator.generate(task, 8, .5).comparison();
+        var cells = comparison.rows().getFirst().cells();
+
+        assertEquals(List.of(Status.UNVERIFIED, Status.NOT_FOUND), cells.stream().map(Cell::status).toList());
+        assertEquals(ReasonCode.INSUFFICIENT_SUPPORT, cells.getFirst().reasonCode());
+        assertEquals(ReasonCode.NO_MATCHING_FACT, cells.getLast().reasonCode());
+        assertTrue(comparison.conclusions().isEmpty());
+    }
+
+    @Test void anchoredMetricWithAnUnparsedQuantityRemainsUnverified() {
+        var task = anchoredTask("对照故障到场时限。", "故障到场时限");
+        anchoredDocuments(Map.of("A", List.of("A12 设备的故障到场时限为 500 毫秒。"),
+                "B", List.of("B12 设备的故障到场时限为十五天。")));
+        when(extractor.extractAnchored(any(), any())).thenReturn(
+                new ComparisonExtractor.AtomicExtraction(List.of(), List.of()));
+
+        var cells = generator.generate(task, 8, .5).comparison().rows().getFirst().cells();
+        assertEquals(List.of(Status.UNVERIFIED, Status.UNVERIFIED), cells.stream().map(Cell::status).toList());
+        assertTrue(cells.stream().allMatch(cell -> cell.reasonCode() == ReasonCode.INSUFFICIENT_SUPPORT));
+    }
+
+    @Test void anchoredScopeWithoutAnIdentifiableObjectRemainsUnverified() {
+        var task = anchoredTask("只纳入 Z8 货梯。", "固定检修周期");
+        anchoredDocuments(Map.of("A", List.of("在北库常温区，货梯的固定检修周期为 15 天。"),
+                "B", List.of("在北库常温区，Z8 货梯的固定检修周期为 15 天。")));
+
+        var cells = generator.generate(task, 8, .5).comparison().rows().getFirst().cells();
+
+        assertEquals(List.of(Status.UNVERIFIED, Status.FOUND), cells.stream().map(Cell::status).toList());
+        assertEquals(ReasonCode.INSUFFICIENT_SUPPORT, cells.getFirst().reasonCode());
+    }
+
+    @Test void anchoredContextWithoutOriginalAnchorsRemainsUnverified() {
+        var task = anchoredTask("对照故障到场时限。", "故障到场时限");
+        var unlocated = hit("A", "在工作日，北湖园区的故障到场时限为 6 小时。");
+        when(taskRetrieval.hybrid(anyString(), eq(Set.of("A")), any())).thenReturn(List.of(unlocated));
+        when(taskRetrieval.hybrid(anyString(), eq(Set.of("B")), any())).thenReturn(List.of());
+
+        var cells = generator.generate(task, 8, .5).comparison().rows().getFirst().cells();
+
+        assertEquals(List.of(Status.UNVERIFIED, Status.NOT_FOUND), cells.stream().map(Cell::status).toList());
+        assertEquals(ReasonCode.NO_ORIGINAL_EVIDENCE, cells.getFirst().reasonCode());
+        verifyNoInteractions(extractor);
+    }
+
+    private DocumentTask anchoredTask(String instruction, String dimension,
+                                      DocumentTaskRequest.SectionSelection... sections) {
+        List<String> documents = List.of("A", "B");
+        var request = new DocumentTaskRequest(DocumentTaskType.COMPARE, documents, instruction,
+                "COMPARISON", "1", sections.length == 0 ? null : List.of(sections), null, List.of(dimension));
+        var task = DocumentTask.create(request.type(), documents, request.instruction());
+        task.setConfiguration(ReportTemplates.resolve(request)
+                .withRetrieval(new ReportRetrievalSettings("full-v2", 8, .5, 4000, 4000)));
+        return task;
+    }
+
+    private void anchoredDocuments(Map<String, List<String>> quotesByDocument) {
+        Map<String, RetrievedChunk> documents = new HashMap<>();
+        quotesByDocument.forEach((document, quotes) -> documents.put(document, hit(document, String.join("\n", quotes))));
+        when(taskRetrieval.hybrid(anyString(), anySet(), any())).thenAnswer(call ->
+                List.of(documents.get(((Set<?>) call.getArgument(1)).iterator().next())));
+        when(verifier.evidenceOptions(anyList(), anyString(), anyInt())).thenAnswer(call -> {
+            List<RetrievedChunk> selected = call.getArgument(0);
+            Map<String, ClaimVerifier.Citation> citations = new LinkedHashMap<>();
+            for (String quote : quotesByDocument.get(selected.getFirst().documentId())) {
+                citations.put("S1E" + (citations.size() + 1), new ClaimVerifier.Citation(1, quote));
+            }
+            return new ClaimVerifier.EvidenceOptions("", citations);
+        });
+        when(support.judgeInScope(anyString(), anyList(), anyString())).thenReturn(
+                new ClaimSupportJudge.Judgment(SupportStatus.SUPPORTED, "与当前维度的完整原句一致"));
+    }
+
     @Test void anchoredComparisonRetainsOnlyTheQuotedPeriodAndConditions() {
         var task = task(List.of("A", "B"), List.of("年度采购预算", "固定交付周期", "故障到场时限", "备件保修期"));
         var configuration = task.getConfiguration();
@@ -184,6 +303,7 @@ class ComparisonGeneratorTest {
         task.setConfiguration(task.getConfiguration().withRetrieval(new ReportRetrievalSettings("full-v2", 8, .5, 4000, 4000)));
         String literal = "在常规工况下，A12 设备的故障到场时限为 6 小时。";
         String irregular = "A12 设备承诺故障到场时限至多 8 小时。";
+        String neighboringLine = "故障到场时限调整为 12 小时。";
         var documents = Map.of("A", hit("A", literal + irregular), "B", hit("B", literal));
         when(taskRetrieval.hybrid(anyString(), anySet(), any())).thenAnswer(call ->
                 List.of(documents.get(((Set<?>) call.getArgument(1)).iterator().next())));
@@ -191,12 +311,15 @@ class ComparisonGeneratorTest {
             List<RetrievedChunk> selected = call.getArgument(0);
             Map<String, ClaimVerifier.Citation> anchors = new LinkedHashMap<>();
             anchors.put("S1E1", new ClaimVerifier.Citation(1, literal));
-            if (selected.getFirst().documentId().equals("A")) anchors.put("S1E2", new ClaimVerifier.Citation(1, irregular));
+            if (selected.getFirst().documentId().equals("A")) {
+                anchors.put("S1E2", new ClaimVerifier.Citation(1, irregular, null, irregular + "\n" + neighboringLine));
+            }
             return new ClaimVerifier.EvidenceOptions("", anchors);
         });
         when(extractor.extractAnchored(any(), any())).thenAnswer(call -> {
             ClaimVerifier.EvidenceOptions evidence = call.getArgument(1);
             assertEquals(Set.of("S1E2"), evidence.citations().keySet());
+            assertEquals("[S1E2] " + irregular + "\n", evidence.prompt());
             return new ComparisonExtractor.AtomicExtraction(List.of(
                     new ComparisonExtractor.NumericFact("S1E2", "A12 设备", "", "", "故障到场时限", "8", "小时")), List.of());
         });

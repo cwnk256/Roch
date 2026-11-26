@@ -414,14 +414,15 @@ npm run build
 - `compose.yaml` — PostgreSQL 与向量库依赖。
 - `scripts/trace_report_acceptance.py` — 隔离环境的上传、生成、重建和重导出验收。
 - `scripts/trace_report_quality.py` — 按人工标注核对原文定位、事实覆盖和结构化比较结果。
-- `scripts/trace_report_release_gate.py` — 对照四种文档检索策略，按冻结样本和实际入选切片统计覆盖、错误事实、对比判断和延迟。
-- 使用 `run --variant full-v2` 运行带原件证据定位的策略。用 `compare-revisions --before-output <原验收目录> --output <新验收目录>` 对比已保存的 `full` 与 `full-v2`，两次验收使用同一组三轮样本和模型。
+- `scripts/trace_report_release_gate.py` — 使用冻结样本验证有据事实覆盖、引文定位、对比结论和延迟。
+- 用 `run --variant full-v2` 分别记录修改前后的三轮结果，并在两次运行中使用相同的样本和模型。用 `compare-revisions --before-output <基线目录> --before-variant full-v2 --output <候选目录>` 比较结果。传入 `--latency-reference-output <原发布基线目录>` 可继续使用归档的 `full` 短文延迟作门槛。试卷复测在两次运行和比较命令中都传入 `--corpus exam-check=<冻结试卷样本目录>`。
+- 扩样门槛按三轮中位数计算，分析报告至少通过 9/12 条，对比事实至少通过 10/13 条，对比结论类别和理由均正确至少 4/7 项。三轮合计引文定位率须至少 95%，所有支持事实关联的引文都须可独立定位。
 - `rag/src/test/resources/traceability/` — 合成验收资料及标注。
 
 脚本支持 `--help`。在独立 Python 环境中安装质量评估依赖后，可查看参数：
 
 ```bash
-python -m pip install pypdf
+python -m pip install pypdf python-docx openpyxl
 python scripts/trace_report_acceptance.py --help
 python scripts/trace_report_quality.py --help
 ```

@@ -6,10 +6,11 @@ import java.util.regex.Pattern;
 
 /** Table identifiers in one question constrain that question's citations independently. */
 final class TableQuestionScope {
-    private static final Pattern QUESTION = Pattern.compile("^\\s*(\\d{1,5})\\s*[.、)）]\\s*(.*)$");
+    private static final Pattern QUESTION = Pattern.compile("^\\s*(\\d{1,5})\\s*(?:\\.(?!\\d)|[、)）])\\s*(.*)$");
     private static final Pattern TABLE = Pattern.compile("(?i)(?:表|(?<![A-Za-z])table)\\s*([0-9]+(?:[-.]\\d+)*)");
     private final Map<Integer,Set<String>> numbered = new HashMap<>();
     private final Set<String> shared = new HashSet<>();
+    private final Map<Integer, StringJoiner> questions = new LinkedHashMap<>();
 
     TableQuestionScope(String purpose) {
         Integer current = null;
@@ -20,11 +21,25 @@ final class TableQuestionScope {
                 normalized = item.group(2);
                 current = Integer.parseInt(item.group(1));
                 numbered.computeIfAbsent(current, key -> new HashSet<>());
+                questions.computeIfAbsent(current, key -> new StringJoiner(" "));
             }
+            if (current != null && !normalized.isBlank()) questions.get(current).add(normalized.strip());
             var ids = current == null ? shared : numbered.get(current);
             var table = TABLE.matcher(normalized);
             while (table.find()) ids.add(table.group(1));
         }
+    }
+
+    Map<Integer, String> questionTexts() {
+        Map<Integer, String> texts = new LinkedHashMap<>();
+        questions.forEach((number, text) -> {
+            if (number > 0) texts.put(number, text.toString());
+        });
+        return texts;
+    }
+
+    boolean hasQuestionNumbers() {
+        return !numbered.isEmpty();
     }
 
     boolean allows(Integer number, ClaimVerifier.Citation citation) {

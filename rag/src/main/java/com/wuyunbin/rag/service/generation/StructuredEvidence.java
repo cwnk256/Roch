@@ -23,6 +23,13 @@ final class StructuredEvidence {
     }
     private record Assertion(String entity, String metric, Amount amount, Integer rank) {}
     private record Scope(String entity, String metric) {}
+    private record TableAnswer(String object, String metric, Amount amount, Integer rank) {
+        boolean sameFields(TableAnswer other) {
+            return other != null && object.equals(other.object) && metric.equals(other.metric)
+                    && Objects.equals(rank, other.rank)
+                    && (amount == null ? other.amount == null : other.amount != null && amount.equalsValue(other.amount, metric));
+        }
+    }
 
     private static final String DIGITS = "[0-9一二三四五六七八九十〇零两]+";
     private static final Pattern RANK = Pattern.compile(
@@ -57,8 +64,74 @@ final class StructuredEvidence {
     private static final Pattern TABLE_CAPTION = Pattern.compile("^(?:#+\\s*)?表\\s*\\d+.*");
     private static final Pattern SCORE_ROW = Pattern.compile("^([^0-9]+?)(?=[+\\-−\\d])(.+)$");
     private static final Pattern NUMBER_IN_ROW = Pattern.compile(NUMBER);
+    private static final Pattern RANK_QUESTION = Pattern.compile("排名|名次|第几[名位]?|位列");
+    private static final Pattern SCORE_QUESTION = Pattern.compile("得分|多少分|分数");
+    private static final Pattern SCORED_METRIC_QUESTION = Pattern.compile(
+            "(?:热度指数|影响度|贡献度)\\s*(?:(?:是|为)?\\s*多少|(?:以及|以及其|及其|和|与|及|、)\\s*(?:排名|名次))");
+    private static final Pattern TABLE_REFERENCE = Pattern.compile("(?i)(?:表|(?<![A-Za-z])table)\\s*[0-9]+(?:[-.]\\d+)*");
+    private static final Pattern NON_EXACT_TABLE_ASSERTION = Pattern.compile(
+            "并非|不是|不为|不等于|没有|未达|低于|高于|超过|不足|至少|至多|左右|大约|约为|预计|可能|假设|假如");
 
     private StructuredEvidence() {}
+
+    static String canonicalTableAnswer(String statement, List<String> physicalFacts) {
+        TableAnswer proposed = tableAnswer(statement);
+        if (proposed == null) return null;
+        var matching = physicalFacts.stream().filter(fact -> proposed.sameFields(tableAnswer(fact))).distinct().toList();
+        return matching.size() == 1 ? matching.getFirst() : null;
+    }
+
+    private static TableAnswer tableAnswer(String statement) {
+        String normalized = TABLE_REFERENCE.matcher(normalize(statement)).replaceAll("").replace("总指数", "热度指数");
+        if (NON_EXACT_TABLE_ASSERTION.matcher(normalized).find()) return null;
+        var objects = ENTITY.matcher(normalized).results().map(match -> match.group().toLowerCase(Locale.ROOT)).distinct().toList();
+        var metrics = METRIC.matcher(normalized).results().map(match -> metricKey(match.group()))
+                .filter(StructuredEvidence::scoreMetric).distinct().toList();
+        if (objects.size() != 1 || metrics.size() != 1) return null;
+        var assertions = assertions(normalized, "", "");
+        var amounts = assertions.stream().map(Assertion::amount).filter(Objects::nonNull).toList();
+        var ranks = assertions.stream().map(Assertion::rank).filter(Objects::nonNull).toList();
+        if (amounts.size() > 1 || ranks.size() > 1 || amounts.isEmpty() && ranks.isEmpty()) return null;
+        return new TableAnswer(objects.getFirst(), metrics.getFirst(),
+                amounts.isEmpty() ? null : amounts.getFirst(), ranks.isEmpty() ? null : ranks.getFirst());
+    }
+
+    static boolean exactlyAnswersTableQuestion(String question, String statement) {
+        String requested = TABLE_REFERENCE.matcher(normalize(question)).replaceAll("").replace("总指数", "热度指数");
+        long objects = ENTITY.matcher(requested).results().map(match -> match.group()).distinct().count();
+        long metrics = METRIC.matcher(requested).results().map(match -> metricKey(match.group()))
+                .filter(StructuredEvidence::scoreMetric).distinct().count();
+        boolean asksOrdinal = assertions(requested, "", "").stream().anyMatch(fact -> fact.rank() != null);
+        if (metrics != 1 || (objects != 1 && (objects != 0 || !asksOrdinal))) return false;
+
+        boolean wantsAmount = SCORE_QUESTION.matcher(requested).find() || SCORED_METRIC_QUESTION.matcher(requested).find();
+        boolean wantsRank = asksOrdinal || RANK_QUESTION.matcher(requested).find();
+        var answer = tableAnswer(statement);
+        return (wantsAmount || wantsRank) && answer != null
+                && wantsAmount == (answer.amount() != null) && wantsRank == (answer.rank() != null)
+                && answersTableQuestion(question, statement);
+    }
+
+    static boolean answersTableQuestion(String question, String statement) {
+        String requested = TABLE_REFERENCE.matcher(normalize(question)).replaceAll("").replace("总指数", "热度指数");
+        String physicalFact = normalize(statement);
+        var objects = ENTITY.matcher(requested).results().map(match -> match.group().toLowerCase(Locale.ROOT)).toList();
+        if (!objects.isEmpty() && objects.stream().noneMatch(object -> consistent(object, "", physicalFact))) return false;
+
+        var requestedMetrics = METRIC.matcher(requested).results().map(match -> metricKey(match.group()))
+                .filter(StructuredEvidence::scoreMetric).toList();
+        if (!requestedMetrics.isEmpty() && METRIC.matcher(physicalFact).results().map(match -> metricKey(match.group()))
+                .noneMatch(requestedMetrics::contains)) return false;
+
+        var requestedRanks = assertions(requested, "", "").stream().map(Assertion::rank).filter(Objects::nonNull).toList();
+        var physicalAssertions = assertions(physicalFact, "", "");
+        if (!requestedRanks.isEmpty()
+                && physicalAssertions.stream().map(Assertion::rank).noneMatch(rank -> rank != null && requestedRanks.contains(rank))) {
+            return false;
+        }
+        return (!RANK_QUESTION.matcher(requested).find() || physicalAssertions.stream().anyMatch(fact -> fact.rank() != null))
+                && (!SCORE_QUESTION.matcher(requested).find() || physicalAssertions.stream().anyMatch(fact -> fact.amount() != null));
+    }
 
     static String insufficiency(String claim, List<Passage> passages) {
         String normalized = normalize(claim);

@@ -180,11 +180,13 @@ public class DocumentTaskExecutor {
                 ? TaskEvidenceRetrieval.balance(candidateLists, scope, budget)
                 : LlmSectionGenerator.selectWithinBudget(candidateLists.getFirst().stream().limit(settings.topK()).toList(),
                         scope, budget);
+        List<List<String>> supplementalMatches = Collections.nCopies(queries.size(), List.of());
         if (settings.anchored() && split) {
             try {
                 var supplement = taskRetrieval.supplement(queries, selected, scope, budget);
                 selected = supplement.selected();
                 candidates += supplement.candidateCount();
+                supplementalMatches = supplement.matchesByQuestion();
             } catch (RuntimeException ex) {
                 if (Thread.currentThread().isInterrupted()) throw ex;
                 evidenceLog.event(task.getTaskId(), sectionNumber, batchNumber, "retrieval",
@@ -202,6 +204,7 @@ public class DocumentTaskExecutor {
         try {
             GeneratedSection result = settings.anchored()
                     ? sectionGenerator.generateAnchoredBatch(task.getType(), section, selected, scope, batchId, budget,
+                            questionEvidence(queries, candidateLists, supplementalMatches),
                             spans -> evidenceLog.anchors(task.getTaskId(), sectionNumber, batchNumber, spans, generationStart))
                     : sectionGenerator.generateBatch(task.getType(), section, selected, scope, batchId, settings.strict());
             progress.completed++;
@@ -215,6 +218,20 @@ public class DocumentTaskExecutor {
             progress.lastFailure = ex;
             return missingBatch(section, batchId, queries, split, "本批次生成失败");
         }
+    }
+
+    private static List<SectionGenerator.QuestionEvidence> questionEvidence(List<String> queries,
+                                                                            List<List<RetrievedChunk>> candidates,
+                                                                            List<List<String>> supplements) {
+        var questions = new ArrayList<SectionGenerator.QuestionEvidence>();
+        for (int index = 0; index < queries.size(); index++) {
+            Set<String> chunkIds = new LinkedHashSet<>();
+            candidates.get(index).stream().filter(Objects::nonNull).map(RetrievedChunk::chunkId)
+                    .filter(Objects::nonNull).forEach(chunkIds::add);
+            chunkIds.addAll(supplements.get(index));
+            questions.add(new SectionGenerator.QuestionEvidence(index + 1, queries.get(index), List.copyOf(chunkIds)));
+        }
+        return List.copyOf(questions);
     }
 
     private static GeneratedSection missingBatch(ReportSectionPlan section, String id, List<String> queries,

@@ -10,8 +10,11 @@ import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 record ComparisonCellScope(String dimension, String constraints, Set<String> includedCodes, Set<String> excludedCodes) {
+    record EquipmentScope(boolean permitted, String exclusionReason) {}
+
     private static final Pattern SENTENCES = Pattern.compile("[。！？；;\\r\\n]+");
     private static final Pattern CONNECTORS = Pattern.compile("[，,、]|以及|并且|和|与");
+    private static final Pattern SECTION_INSTRUCTION_PREFIX = Pattern.compile("^分章要求[：:]\\s*");
     private static final Pattern CODE = Pattern.compile("[A-Za-z]+[-_]?\\d+[A-Za-z\\d-]*");
     private static final String ENTITY = "项目|园区|压缩机|货梯|设备|仪器|机组|装置|厂区";
     private static final Pattern SUBJECT = Pattern.compile(
@@ -40,7 +43,8 @@ record ComparisonCellScope(String dimension, String constraints, Set<String> inc
         var markers = Stream.concat(Stream.of(marker), siblings.stream()).toList();
         for (String instruction : instructions) {
             for (String sentence : SENTENCES.split(instruction)) {
-                List<String> parts = clauses(sentence, markers).toList();
+                String text = SECTION_INSTRUCTION_PREFIX.matcher(sentence.strip()).replaceFirst("");
+                List<String> parts = clauses(text, markers).toList();
                 if (parts.size() > 1) {
                     var subject = SUBJECT.matcher(parts.getFirst().strip());
                     if (subject.find() && parts.stream().anyMatch(part -> AnchoredComparisonFacts.metricKey(part).contains(marker))
@@ -143,10 +147,22 @@ record ComparisonCellScope(String dimension, String constraints, Set<String> inc
                 .matcher(object).find() == include;
     }
 
-    boolean permits(String quote) {
-        Set<String> codes = CODE.matcher(quote).results().map(m -> m.group().toLowerCase(Locale.ROOT))
+    EquipmentScope equipmentScope(String object) {
+        if (includedCodes.isEmpty() && excludedCodes.isEmpty()) return new EquipmentScope(true, "");
+        Set<String> codes = CODE.matcher(object).results().map(m -> m.group().toLowerCase(Locale.ROOT))
                 .collect(java.util.stream.Collectors.toSet());
-        return java.util.Collections.disjoint(codes, excludedCodes)
-                && (includedCodes.isEmpty() || includedCodes.stream().anyMatch(codes::contains));
+        if (codes.size() != 1) return new EquipmentScope(false, "");
+        String code = codes.iterator().next();
+        boolean excluded = excludedCodes.contains(code);
+        boolean notIncluded = !includedCodes.isEmpty() && !includedCodes.contains(code);
+        if (!excluded && !notIncluded) return new EquipmentScope(true, "");
+        String reason = excluded ? "原文中的事实适用于请求明确排除的「" + object + "」。"
+                : "原文中的事实适用于「" + object + "」，超出本次比较范围。";
+        if (notIncluded) {
+            String inclusions = includedCodes.stream().sorted().map(included -> included.toUpperCase(Locale.ROOT))
+                    .collect(java.util.stream.Collectors.joining("、"));
+            reason += "请求仅纳入 " + inclusions + "。";
+        }
+        return new EquipmentScope(false, reason);
     }
 }

@@ -10,6 +10,10 @@ Use --cases real/full-document long/equipment-compare for an incremental run; re
 without --cases to complete the gate, with existing finished tasks reused.
 Score: python scripts/trace_report_release_gate.py summary --guardrail-proof rag/target/surefire-reports
        --compatibility-proof rag/target/surefire-reports
+To compare two full-v2 revisions, run each with its own --output, then use
+compare-revisions --before-output DIR --before-variant full-v2 --output DIR.
+For this release comparison, include --corpus exam-check=DIR when running and
+scoring both revisions, and provide --latency-reference-output DIR when scoring.
 """
 
 import argparse
@@ -26,6 +30,7 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 ROOT = Path(__file__).resolve().parents[1]
 VARIANTS = ("baseline", "hybrid-only", "question-split", "full")
 ANCHORED_VARIANT = "full-v2"
+EXAM_CORPUS = "exam-check"
 CORPORA = {
     "expanded": ROOT / "logs/model-benchmark-20261124-163206",
     "long": ROOT / "logs/long-benchmark-20261124-164748",
@@ -243,8 +248,8 @@ def parse_corpora(values):
     corpora = dict(CORPORA)
     for value in values:
         name, separator, directory = value.partition("=")
-        if not separator or name not in corpora:
-            raise ValueError("Use --corpus expanded=DIR, long=DIR or real=DIR")
+        if not separator or not directory or name not in (*CORPORA, EXAM_CORPUS):
+            raise ValueError("Use --corpus expanded=DIR, long=DIR, real=DIR or exam-check=DIR")
         corpora[name] = Path(directory)
     return corpora
 
@@ -271,9 +276,16 @@ def main():
     judge.add_argument("--compatibility-proof", type=Path, help="Surefire XML for legacy read/re-export")
     revisions = commands.add_parser("compare-revisions", parents=[common])
     revisions.add_argument("--before-output", type=Path, required=True)
+    revisions.add_argument("--before-variant", choices=(*VARIANTS, ANCHORED_VARIANT), default="full")
+    revisions.add_argument("--latency-reference-output", type=Path,
+                           help="Archived full-strategy output with the same expanded fixtures and models. "
+                                "Required with --before-variant full-v2")
     revisions.add_argument("--guardrail-proof", type=Path)
     revisions.add_argument("--compatibility-proof", type=Path)
     args = parser.parse_args()
+    if args.action == "compare-revisions" and args.before_variant == ANCHORED_VARIANT \
+            and args.before_output.resolve() == args.output.resolve():
+        parser.error("Use distinct --before-output and --output directories when comparing full-v2 revisions")
     args.output.mkdir(parents=True, exist_ok=True)
     corpora = parse_corpora(args.corpus)
     if args.action == "run":

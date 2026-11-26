@@ -30,7 +30,16 @@ public class ClaimVerifier {
     }
 
     public record AnchorSpan(String chunkId, String documentId, Integer pageStart, Integer pageEnd,
-                             int start, int characters) {}
+                             int start, int characters, Integer question) {
+        public AnchorSpan(String chunkId, String documentId, Integer pageStart, Integer pageEnd,
+                          int start, int characters) {
+            this(chunkId, documentId, pageStart, pageEnd, start, characters, null);
+        }
+
+        AnchorSpan forQuestion(int number) {
+            return new AnchorSpan(chunkId, documentId, pageStart, pageEnd, start, characters, number);
+        }
+    }
 
     public record EvidenceOptions(String prompt, Map<String, Citation> citations) {
         public List<AnchorSpan> spans(List<RetrievedChunk> selected) {
@@ -62,6 +71,7 @@ public class ClaimVerifier {
             var row = chunks.findById(hit.chunkId()).filter(r -> Objects.equals(r.getDocMd5(), hit.documentId())).orElse(null);
             if (row == null || row.getContent() == null) continue;
             int source = i + 1;
+            Set<Citation> sourceOptions = new LinkedHashSet<>();
             String name = Objects.toString(row.getFileName(), "").toLowerCase(Locale.ROOT);
             boolean pdf = name.endsWith(".pdf");
             if (name.matches(".*\\.xlsx?")) {
@@ -73,10 +83,11 @@ public class ClaimVerifier {
                     if (cell.text().length() > 1000 || occurrences.get(compact(cell.text())) != 1) continue;
                     Pattern pattern = quotePattern(cell.text());
                     if (pattern.matcher(row.getContent()).find() && pattern.matcher(hit.content()).find()) {
-                        addOption(options, new Citation(source, cell.text(), cell.sheet() + "!" + cell.range(),
+                        sourceOptions.add(new Citation(source, cell.text(), cell.sheet() + "!" + cell.range(),
                                 cell.header() + "\n" + cell.text(), null, null));
                     }
                 }
+                addOptions(options, sourceOptions);
                 continue;
             }
             var tableRows = pdf && row.getPageStart() != null
@@ -92,8 +103,9 @@ public class ClaimVerifier {
                 var found = NativeTextSpan.find(nativePage, table.row());
                 if (found != null && found.quote().length() <= 1000
                         && tableRows.stream().filter(t -> compact(t.row()).equals(compact(table.row()))).count() == 1) {
-                    addOption(options, new Citation(source, found.quote(), null,
-                            table.caption() + "\n" + String.join("；", table.facts()), table.facts(), table.caption()));
+                    var physicalFacts = captionedPhysicalFacts(table);
+                    sourceOptions.add(new Citation(source, found.quote(), null,
+                            table.caption() + "\n" + String.join("；", physicalFacts), physicalFacts, table.caption()));
                 }
             }
             String boundaries = "(?<=[。！？!?；;])|\\R+|(?<=\\.)\\s+(?=[A-Z])";
@@ -105,54 +117,92 @@ public class ClaimVerifier {
                 if (pdf && overlapsPdfTable(candidate, tableRows)) continue;
                 if (!selectedText.contains(compact(candidate)) || NativeTextSpan.find(row.getContent(), candidate) == null) continue;
                 var span = NativeTextSpan.find(nativeText, candidate);
-                if (span != null && span.isCompleteClause(nativeText, !pdf) && span.quote().length() <= 1000) addOption(options,
+                if (span != null && span.isCompleteClause(nativeText, !pdf) && span.quote().length() <= 1000) sourceOptions.add(
                         new Citation(source, span.quote(), null, span.quote(), null, null));
             }
             if (nativePage != null && originals.hasInvisiblePdfText(hit.documentId(), row.getPageStart())) {
-                addOcrLineOptions(options, source, nativePage, hit.content(), row.getContent(), tableRows);
+                addOcrLineOptions(sourceOptions, source, nativePage, hit.content(), row.getContent(), tableRows);
             }
+            addOptions(options, sourceOptions);
         }
-        var ranked = new ArrayList<>(options.entrySet());
-        var queryTerms = bigrams(query);
-        if (!queryTerms.isEmpty()) ranked.sort(Comparator.comparingInt((Map.Entry<String,Citation> e) ->
-                relevance(e.getValue().physicalFacts() == null && e.getValue().cellLocation() == null
-                        ? e.getValue().quote() : e.getValue().nativeContext(), queryTerms)).reversed());
         var visible = new LinkedHashMap<String,Citation>();
-        for (var entry : ranked) {
-            Citation citation = entry.getValue();
-            String passage = renderPassage(citation);
-            String line = "[" + entry.getKey() + "] " + Objects.toString(citation.cellLocation(), "") + " " + passage + "\n";
+        for (var entry : rankOptions(options, query)) {
+            String line = renderOption(entry.getKey(), entry.getValue());
             if (prompt.length() + line.length() > budget) continue;
-            visible.put(entry.getKey(), citation);
+            visible.put(entry.getKey(), entry.getValue());
             prompt.append(line);
         }
         return new EvidenceOptions(prompt.toString(), Collections.unmodifiableMap(visible));
     }
 
-    private static void addOcrLineOptions(Map<String, Citation> options, int source, String page, String selected,
+    private static List<String> captionedPhysicalFacts(TableRow table) {
+        if (!table.row().stripLeading().startsWith("领域汇总") || !table.caption().contains("研究前沿热度指数")) {
+            return table.facts();
+        }
+        // 行名只写“领域汇总”时，用同一物理表标题中明确注明的指标补全事实。
+        return table.facts().stream().map(fact -> fact.replace("的领域汇总", "的领域汇总热度指数")).toList();
+    }
+
+    private static void addOcrLineOptions(Set<Citation> options, int source, String page, String selected,
                                           String indexed, List<TableRow> tableRows) {
-        // OCR 字符可能缺失句末标点。保留原页整行作为引文，相邻行只用于检查限制条件。
+        // 跨行引文必须能同时在原页、存档切片和本轮入选文本中完整定位。
         var lines = page.lines().map(String::strip).filter(line -> !line.isEmpty()).toList();
+        String selectedText = compact(selected);
+        String indexedText = compact(indexed);
         for (int i = 0; i < lines.size(); i++) {
             String line = lines.get(i);
-            if (line.length() < 2 || line.length() > 1000 || overlapsPdfTable(line, tableRows)
-                    || NativeTextSpan.find(selected, line) == null || NativeTextSpan.find(indexed, line) == null) continue;
-            var span = NativeTextSpan.find(page, line);
+            var span = alignedOcrSpan(line, page, selected, indexed, selectedText, indexedText, tableRows);
             if (span == null) continue;
-            String quote = span.quote();
-            boolean alreadyOffered = options.values().stream()
-                    .anyMatch(citation -> citation.source() == source && citation.quote().equals(quote));
-            if (!alreadyOffered) {
-                String context = String.join("\n", lines.subList(Math.max(0, i - 1), Math.min(lines.size(), i + 2)));
-                addOption(options, new Citation(source, quote, null, context));
+            int last = i;
+            while (last + 1 < lines.size() && ocrContinuation(lines.get(last), lines.get(last + 1))) {
+                var extended = alignedOcrSpan(line + "\n" + lines.get(last + 1),
+                        page, selected, indexed, selectedText, indexedText, tableRows);
+                if (extended == null) break;
+                span = extended;
+                line = span.quote();
+                last++;
             }
+            String quote = span.quote();
+            if (options.stream().noneMatch(citation -> citation.quote().equals(quote))) {
+                String context = String.join("\n", lines.subList(Math.max(0, i - 1), Math.min(lines.size(), last + 2)));
+                options.add(new Citation(source, quote, null, context));
+            }
+            i = last;
         }
     }
 
+    private static NativeTextSpan alignedOcrSpan(String text, String page, String selected, String indexed,
+                                                 String selectedText, String indexedText, List<TableRow> tableRows) {
+        if (text.length() < 2 || text.length() > 1000) return null;
+        String normalized = compact(text);
+        if (!selectedText.contains(normalized) || !indexedText.contains(normalized) || overlapsPdfTable(text, tableRows)
+                || NativeTextSpan.find(selected, text) == null || NativeTextSpan.find(indexed, text) == null) return null;
+        return NativeTextSpan.find(page, text);
+    }
+
+    private static final Pattern OCR_QUALIFIER = Pattern.compile(
+            "^(?:但|仅限|除非|前提是|(?i:but\\b|unless\\b|only\\s+if\\b|provided\\s+that\\b))");
+
+    private static boolean ocrContinuation(String before, String after) {
+        return "、，,：:".indexOf(before.charAt(before.length() - 1)) >= 0
+                || OCR_QUALIFIER.matcher(after).find();
+    }
+
+    static String renderOption(String id, Citation citation) {
+        return "[" + id + "] " + Objects.toString(citation.cellLocation(), "") + " " + renderPassage(citation) + "\n";
+    }
+
+    static List<Map.Entry<String, Citation>> rankOptions(Map<String, Citation> options, String query) {
+        var ranked = new ArrayList<>(options.entrySet());
+        var queryTerms = bigrams(query);
+        if (!queryTerms.isEmpty()) ranked.sort(Comparator.comparingInt((Map.Entry<String, Citation> entry) ->
+                relevance(entry.getValue().physicalFacts() == null && entry.getValue().cellLocation() == null
+                        ? entry.getValue().quote() : entry.getValue().nativeContext(), queryTerms)).reversed());
+        return ranked;
+    }
+
     private static String renderPassage(Citation citation) {
-        if (hasOcrContext(citation)) {
-            return citation.quote() + "\n（相邻原文仅用于核对上下文和条件）\n" + citation.nativeContext();
-        }
+        if (hasOcrContext(citation)) return citation.quote();
         if (citation.physicalFacts() == null) return Objects.requireNonNullElse(citation.nativeContext(), citation.quote());
         StringJoiner facts = new StringJoiner("；", Objects.toString(citation.tableCaption(), "") + "\n", "");
         for (int index = 0; index < citation.physicalFacts().size(); index++) {
@@ -195,10 +245,11 @@ public class ClaimVerifier {
                 .anyMatch(row -> normalized.contains(row) || row.contains(normalized));
     }
 
-    private static void addOption(Map<String, Citation> options, Citation citation) {
-        if (options.size() >= 512 || options.containsValue(citation)) return;
-        String id = "S" + citation.source() + "E" + (options.size() + 1);
-        options.put(id, citation);
+    private static void addOptions(Map<String, Citation> options, Set<Citation> sourceOptions) {
+        for (Citation citation : sourceOptions.stream().limit(512).toList()) {
+            String id = "S" + citation.source() + "E" + (options.size() + 1);
+            options.put(id, citation);
+        }
     }
 
     private static Pattern quotePattern(String text) {
