@@ -1,6 +1,7 @@
 package com.wuyunbin.rag.service;
 
 import org.apache.pdfbox.pdmodel.PDPage;
+import org.apache.pdfbox.pdmodel.graphics.state.RenderingMode;
 import org.apache.pdfbox.text.PDFTextStripper;
 import org.apache.pdfbox.text.TextPosition;
 
@@ -22,10 +23,21 @@ final class PdfTableLayout extends PDFTextStripper {
     private static final Pattern RANK = Pattern.compile("排名|名次|rank", Pattern.CASE_INSENSITIVE);
     private final List<TextPosition> glyphs = new ArrayList<>();
     final Map<Integer,String> pageTexts = new HashMap<>();
+    final Set<Integer> invisibleTextPages = new HashSet<>();
     private final StringBuilder nativePage = new StringBuilder();
     final List<PdfDocumentParser.TableRow> rows = new ArrayList<>();
+    private boolean hasVisibleText;
+    private boolean hasInvisibleText;
 
     PdfTableLayout() throws IOException { setSortByPosition(false); }
+
+    @Override protected void processTextPosition(TextPosition position) {
+        if (position.getUnicode() != null && !position.getUnicode().isBlank()) {
+            if (getGraphicsState().getTextState().getRenderingMode() == RenderingMode.NEITHER) hasInvisibleText = true;
+            else hasVisibleText = true;
+        }
+        super.processTextPosition(position);
+    }
 
     @Override protected void writeString(String text, List<TextPosition> positions) {
         nativePage.append(text.replace("\0", ""));
@@ -51,6 +63,9 @@ final class PdfTableLayout extends PDFTextStripper {
         collectRows(lines, getCurrentPageNo());
         glyphs.clear();
         pageTexts.put(getCurrentPageNo(), nativePage.toString());
+        if (hasInvisibleText && !hasVisibleText) invisibleTextPages.add(getCurrentPageNo());
+        hasInvisibleText = false;
+        hasVisibleText = false;
         nativePage.setLength(0);
     }
 

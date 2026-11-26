@@ -58,6 +58,10 @@ public class OriginalPassages {
         return page == null ? null : layout(id).pages().get(page);
     }
 
+    boolean hasInvisiblePdfText(String id, Integer page) {
+        return page != null && layout(id).invisibleTextPages().contains(page);
+    }
+
     private PdfDocumentParser.NativeLayout layout(String id) {
         var cache = taskTables.get();
         return cache == null ? loadTables(id) : cache.computeIfAbsent(id, this::loadTables);
@@ -70,9 +74,9 @@ public class OriginalPassages {
                 return pdf.nativeLayout(new ByteArrayInputStream(stored.get().content()));
             }
         } catch (IOException | RuntimeException unavailable) {
-            return new PdfDocumentParser.NativeLayout(Map.of(), java.util.List.of());
+            return new PdfDocumentParser.NativeLayout(Map.of(), java.util.List.of(), java.util.Set.of());
         }
-        return new PdfDocumentParser.NativeLayout(Map.of(), java.util.List.of());
+        return new PdfDocumentParser.NativeLayout(Map.of(), java.util.List.of(), java.util.Set.of());
     }
     String nativeOfficeOrText(String id) {
         var cache = taskNativeTexts.get();

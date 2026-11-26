@@ -3,6 +3,7 @@ package com.wuyunbin.rag.service.generation;
 import com.wuyunbin.rag.dto.RetrievedChunk;
 import com.wuyunbin.rag.persistence.chunk.DocumentChunkEntity;
 import com.wuyunbin.rag.persistence.chunk.DocumentChunkJpaRepository;
+import com.wuyunbin.rag.service.PdfDocumentParser.TableRow;
 import com.wuyunbin.rag.service.generation.model.*;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -62,6 +63,7 @@ public class ClaimVerifier {
             if (row == null || row.getContent() == null) continue;
             int source = i + 1;
             String name = Objects.toString(row.getFileName(), "").toLowerCase(Locale.ROOT);
+            boolean pdf = name.endsWith(".pdf");
             if (name.matches(".*\\.xlsx?")) {
                 var sheetRows = originals.rows(hit.documentId()).stream()
                         .filter(r -> Objects.equals(r.sheet(), row.getSectionPath())).toList();
@@ -77,11 +79,11 @@ public class ClaimVerifier {
                 }
                 continue;
             }
-            var tableRows = name.endsWith(".pdf") && row.getPageStart() != null
+            var tableRows = pdf && row.getPageStart() != null
                     ? originals.tableRows(hit.documentId()).stream().filter(t -> t.page() == row.getPageStart()).toList()
-                    : List.<com.wuyunbin.rag.service.PdfDocumentParser.TableRow>of();
-            String nativePage = name.endsWith(".pdf") ? originals.nativePdfPage(hit.documentId(), row.getPageStart()) : null;
-            String nativeText = name.endsWith(".pdf") ? nativePage : originals.nativeOfficeOrText(hit.documentId());
+                    : List.<TableRow>of();
+            String nativePage = pdf ? originals.nativePdfPage(hit.documentId(), row.getPageStart()) : null;
+            String nativeText = pdf ? nativePage : originals.nativeOfficeOrText(hit.documentId());
             String selectedText = compact(hit.content());
             for (var table : tableRows) {
                 if (table.facts().isEmpty() || !selectedText.contains(compact(table.row()))) continue;
@@ -100,19 +102,21 @@ public class ClaimVerifier {
             for (String sentence : candidates) {
                 String candidate = sentence.strip().replaceFirst("^#{1,6}\\s+", "");
                 if (candidate.length() < 2 || candidate.length() > 1000 || row.getContent().isBlank()) continue;
-                if (name.endsWith(".pdf") && (looksLikeTable(candidate) || tableRows.stream()
-                        .anyMatch(t -> compact(candidate).contains(compact(t.row()))
-                                || compact(t.row()).contains(compact(candidate))))) continue;
+                if (pdf && overlapsPdfTable(candidate, tableRows)) continue;
                 if (!selectedText.contains(compact(candidate)) || NativeTextSpan.find(row.getContent(), candidate) == null) continue;
                 var span = NativeTextSpan.find(nativeText, candidate);
-                if (span != null && span.isCompleteClause(nativeText, !name.endsWith(".pdf")) && span.quote().length() <= 1000) addOption(options,
+                if (span != null && span.isCompleteClause(nativeText, !pdf) && span.quote().length() <= 1000) addOption(options,
                         new Citation(source, span.quote(), null, span.quote(), null, null));
+            }
+            if (nativePage != null && originals.hasInvisiblePdfText(hit.documentId(), row.getPageStart())) {
+                addOcrLineOptions(options, source, nativePage, hit.content(), row.getContent(), tableRows);
             }
         }
         var ranked = new ArrayList<>(options.entrySet());
         var queryTerms = bigrams(query);
         if (!queryTerms.isEmpty()) ranked.sort(Comparator.comparingInt((Map.Entry<String,Citation> e) ->
-                relevance(Objects.requireNonNullElse(e.getValue().nativeContext(), e.getValue().quote()), queryTerms)).reversed());
+                relevance(e.getValue().physicalFacts() == null && e.getValue().cellLocation() == null
+                        ? e.getValue().quote() : e.getValue().nativeContext(), queryTerms)).reversed());
         var visible = new LinkedHashMap<String,Citation>();
         for (var entry : ranked) {
             Citation citation = entry.getValue();
@@ -125,13 +129,41 @@ public class ClaimVerifier {
         return new EvidenceOptions(prompt.toString(), Collections.unmodifiableMap(visible));
     }
 
+    private static void addOcrLineOptions(Map<String, Citation> options, int source, String page, String selected,
+                                          String indexed, List<TableRow> tableRows) {
+        // OCR 字符可能缺失句末标点。保留原页整行作为引文，相邻行只用于检查限制条件。
+        var lines = page.lines().map(String::strip).filter(line -> !line.isEmpty()).toList();
+        for (int i = 0; i < lines.size(); i++) {
+            String line = lines.get(i);
+            if (line.length() < 2 || line.length() > 1000 || overlapsPdfTable(line, tableRows)
+                    || NativeTextSpan.find(selected, line) == null || NativeTextSpan.find(indexed, line) == null) continue;
+            var span = NativeTextSpan.find(page, line);
+            if (span == null) continue;
+            String quote = span.quote();
+            boolean alreadyOffered = options.values().stream()
+                    .anyMatch(citation -> citation.source() == source && citation.quote().equals(quote));
+            if (!alreadyOffered) {
+                String context = String.join("\n", lines.subList(Math.max(0, i - 1), Math.min(lines.size(), i + 2)));
+                addOption(options, new Citation(source, quote, null, context));
+            }
+        }
+    }
+
     private static String renderPassage(Citation citation) {
+        if (hasOcrContext(citation)) {
+            return citation.quote() + "\n（相邻原文仅用于核对上下文和条件）\n" + citation.nativeContext();
+        }
         if (citation.physicalFacts() == null) return Objects.requireNonNullElse(citation.nativeContext(), citation.quote());
         StringJoiner facts = new StringJoiner("；", Objects.toString(citation.tableCaption(), "") + "\n", "");
         for (int index = 0; index < citation.physicalFacts().size(); index++) {
             facts.add("(" + (index + 1) + ") " + citation.physicalFacts().get(index));
         }
         return facts.toString();
+    }
+
+    private static boolean hasOcrContext(Citation citation) {
+        return citation.physicalFacts() == null && citation.cellLocation() == null
+                && citation.nativeContext() != null && !citation.nativeContext().equals(citation.quote());
     }
 
     private static Set<String> bigrams(String text) {
@@ -156,6 +188,13 @@ public class ClaimVerifier {
                 || text.contains("|");
     }
 
+    private static boolean overlapsPdfTable(String candidate, List<TableRow> tableRows) {
+        if (looksLikeTable(candidate)) return true;
+        String normalized = compact(candidate);
+        return tableRows.stream().map(row -> compact(row.row()))
+                .anyMatch(row -> normalized.contains(row) || row.contains(normalized));
+    }
+
     private static void addOption(Map<String, Citation> options, Citation citation) {
         if (options.size() >= 512 || options.containsValue(citation)) return;
         String id = "S" + citation.source() + "E" + (options.size() + 1);
@@ -175,7 +214,7 @@ public class ClaimVerifier {
         return Pattern.compile(expression, Pattern.UNICODE_CHARACTER_CLASS | Pattern.CASE_INSENSITIVE);
     }
     public record VerifiedClaim(Claim claim, List<Evidence> evidences) {}
-    private record Located(Evidence evidence, String context, String originalContext) {}
+    private record Located(Evidence evidence, String context, String originalContext, boolean ocrText) {}
 
     private static final Pattern WHITESPACE = Pattern.compile("\\s+", Pattern.UNICODE_CHARACTER_CLASS);
     private final DocumentChunkJpaRepository chunks;
@@ -253,7 +292,7 @@ public class ClaimVerifier {
             if (snapshot.sourceStatus() == SourceStatus.MATCHED) {
                 passages.add(new ClaimSupportJudge.Passage(snapshot.quote(), located.context()));
                 if (strict) structured.add(new StructuredEvidence.Passage(snapshot.quote(), located.context(),
-                        located.originalContext()));
+                        located.originalContext(), located.ocrText()));
             } else {
                 invalid = true;
                 failure = snapshot.sourceStatus() == SourceStatus.QUOTE_MISMATCH
@@ -302,6 +341,7 @@ public class ClaimVerifier {
         String quote = null;
         String originalContext = null;
         String nativeLocation = null;
+        boolean ocrText = false;
         if (available && citation.nativeContext() != null && citation.cellLocation() == null && originals != null) {
             boolean pdf = Objects.toString(row.getFileName(), "").toLowerCase(Locale.ROOT).endsWith(".pdf");
             String page = pdf ? originals.nativePdfPage(hit.documentId(), row.getPageStart()) : originals.nativeOfficeOrText(hit.documentId());
@@ -311,6 +351,7 @@ public class ClaimVerifier {
                     && NativeTextSpan.find(row.getContent(), proposed) != null) {
                 quote = matched.quote();
                 originalContext = page;
+                ocrText = pdf && originals.hasInvisiblePdfText(hit.documentId(), row.getPageStart());
                 nativeLocation = (pdf ? "PDF 页内字符 [" : "原文字符 [") + matched.start() + "," + matched.end() + ")";
                 String tableId = TableQuestionScope.captionId(citation.tableCaption());
                 if (tableId != null) nativeLocation += "（表" + tableId + "）";
@@ -350,7 +391,9 @@ public class ClaimVerifier {
                 hit.chunkId(), citation.cellLocation() != null && quote != null ? citation.cellLocation() : available ? row.getSectionPath() : null, available ? row.getPageStart() : null,
                 available ? row.getPageEnd() : null, hit.score(), id, quote, status,
                 available ? row.getPipelineVersion() : null, hash, available ? row.getChunkIndex() : null, attempted, nativeLocation);
-        return new Located(snapshot, citation.cellLocation() != null ? originalContext : available ? row.getContent() : null, originalContext);
+        String context = citation.cellLocation() != null ? originalContext : available ? row.getContent() : null;
+        if (quote != null && hasOcrContext(citation)) context = citation.nativeContext();
+        return new Located(snapshot, context, originalContext, ocrText);
     }
 
     public static String hashText(String text) {

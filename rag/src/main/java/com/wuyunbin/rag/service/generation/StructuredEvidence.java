@@ -13,7 +13,7 @@ import java.util.stream.Collectors;
 
 /** 独立于模型的事实核验下限，按原引文中的值及其归属判定结构化断言。 */
 final class StructuredEvidence {
-    record Passage(String quote, String chunk, String originalPage) {}
+    record Passage(String quote, String chunk, String originalPage, boolean ocrText) {}
     private record Amount(BigDecimal value, String unit) {
         boolean equalsValue(Amount other, String metric) {
             return value.compareTo(other.value) == 0 && (unit.equals(other.unit)
@@ -31,9 +31,12 @@ final class StructuredEvidence {
     private static final Pattern ORDINAL = Pattern.compile("第\\s*(" + DIGITS + ")");
     private static final Pattern SERIES = Pattern.compile("分别(?:为|是|达到|得分为)?|依次(?:为|是|达到|得分为)?");
     private static final String NUMBER = "[+\\-−]?(?:\\d{1,3}(?:,\\d{3})+|\\d+)(?:\\.\\d+)?";
+    private static final String AREA_UNIT = "平方千米|平方公里|平方米|平方厘米|平方毫米|万亩|公顷|亩";
+    private static final Pattern OCR_AREA_DECIMAL = Pattern.compile(
+            "(?<=\\p{IsHan})(\\h*[0-9]+)\\h+．\\h+([0-9]+)(?=\\h*(?:" + AREA_UNIT + "))");
     private static final Pattern QUANTITY = Pattern.compile(
             "(?<![a-zA-Z0-9.,+\\-−])(" + NUMBER + ")(?![0-9]|[.,][0-9])\\s*"
-            + "(亿元|万元|千元|元|万美元|美元|万欧元|欧元|百分点|个百分点|%|"
+            + "(" + AREA_UNIT + "|亿元|万元|千元|元|万美元|美元|万欧元|欧元|百分点|个百分点|%|"
             + "小时|分钟|毫秒|微秒|纳秒|秒钟|秒|星期|周|个月|月|年|天|日|分|"
             + "千瓦|毫瓦|瓦|千米|公里|厘米|毫米|微米|纳米|米|吨|毫克|千克|公斤|克|毫升|升|[a-zA-Zµμ]+)?");
     private static final Pattern COUNTRY = Pattern.compile(
@@ -83,7 +86,9 @@ final class StructuredEvidence {
     }
 
     private static boolean supports(Assertion assertion, Passage passage) {
-        String quote = normalize(passage.quote());
+        // 保留存档引文的字形和偏移，仅在核验中连接 OCR 分隔的面积小数。
+        String source = passage.ocrText() ? OCR_AREA_DECIMAL.matcher(passage.quote()).replaceAll("$1.$2") : passage.quote();
+        String quote = normalize(source);
         if (quote.contains("|") || DECIMAL_COLUMNS.matcher(quote).find()) {
             String indexed = normalize(passage.chunk());
             String original = passage.originalPage() == null ? indexed : normalize(passage.originalPage());

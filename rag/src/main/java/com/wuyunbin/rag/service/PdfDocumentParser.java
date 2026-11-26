@@ -14,6 +14,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * PDF 文档解析器：提取文本并按字号统计检测标题，转为 ATX Markdown。
@@ -58,7 +59,7 @@ public class PdfDocumentParser {
 
     public record TableRow(int page, String caption, String row, List<String> facts) {}
 
-    public record NativeLayout(Map<Integer,String> pages, List<TableRow> rows) {}
+    public record NativeLayout(Map<Integer,String> pages, List<TableRow> rows, Set<Integer> invisibleTextPages) {}
 
     public List<TableRow> physicalTableRows(InputStream input) throws IOException {
         return nativeLayout(input).rows();
@@ -68,7 +69,8 @@ public class PdfDocumentParser {
         try (PDDocument document = Loader.loadPDF(input.readAllBytes())) {
             var layout = new PdfTableLayout();
             layout.getText(document);
-            return new NativeLayout(Map.copyOf(layout.pageTexts), List.copyOf(layout.rows));
+            return new NativeLayout(Map.copyOf(layout.pageTexts), List.copyOf(layout.rows),
+                    Set.copyOf(layout.invisibleTextPages));
         }
     }
 

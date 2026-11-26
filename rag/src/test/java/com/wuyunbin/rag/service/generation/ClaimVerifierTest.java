@@ -3,9 +3,21 @@ package com.wuyunbin.rag.service.generation;
 import com.wuyunbin.rag.dto.RetrievedChunk;
 import com.wuyunbin.rag.persistence.chunk.DocumentChunkEntity;
 import com.wuyunbin.rag.persistence.chunk.DocumentChunkJpaRepository;
+import com.wuyunbin.rag.service.PdfDocumentParser;
+import com.wuyunbin.rag.service.TableTextEnhancer;
 import com.wuyunbin.rag.service.generation.model.SourceStatus;
 import com.wuyunbin.rag.service.generation.model.SupportStatus;
+import com.wuyunbin.rag.service.storage.DocumentStorage;
+import org.apache.pdfbox.pdmodel.PDDocument;
+import org.apache.pdfbox.pdmodel.PDPage;
+import org.apache.pdfbox.pdmodel.PDPageContentStream;
+import org.apache.pdfbox.pdmodel.font.PDType1Font;
+import org.apache.pdfbox.pdmodel.font.Standard14Fonts;
+import org.apache.pdfbox.pdmodel.graphics.state.RenderingMode;
 import org.junit.jupiter.api.Test;
+import org.springframework.util.DigestUtils;
+
+import java.io.ByteArrayOutputStream;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -98,6 +110,88 @@ class ClaimVerifierTest {
         var instance = new ClaimVerifier(chunks, judge, nativeSource);
         var cropped = new RetrievedChunk("c","d","source.txt",truncated,null,null,null,0,1);
         assertTrue(instance.evidenceOptions(List.of(cropped)).citations().isEmpty());
+    }
+
+    @Test void anchorsAnOcrLineWithoutASentenceStopAndKeepsItsQualification() throws Exception {
+        String line = "Inspection interval is 30 days";
+        String qualifier = "but only during the trial period";
+        byte[] bytes = pdfWithTextLines(RenderingMode.NEITHER, "Maintenance handbook", line, qualifier);
+        String id = DigestUtils.md5DigestAsHex(bytes);
+        var storage = mock(DocumentStorage.class);
+        when(storage.load(id)).thenReturn(Optional.of(new DocumentStorage.StoredDocument(id, "manual.pdf", bytes)));
+        var row = persisted(id);
+        row.setFileName("manual.pdf");
+        row.setPageStart(1);
+        row.setPageEnd(1);
+        row.setContent("### inspection interval is 30 days");
+        when(chunks.findById("c")).thenReturn(Optional.of(row));
+        var selected = List.of(new RetrievedChunk("c", id, "manual.pdf", row.getContent(), null, 1, 1, 0, 1));
+        var verifier = new ClaimVerifier(chunks, judge,
+                new OriginalPassages(storage, new PdfDocumentParser(new TableTextEnhancer()), null, null));
+
+        var options = verifier.evidenceOptions(selected, "inspection interval", 1_000);
+        assertEquals(List.of(line), options.citations().values().stream().map(ClaimVerifier.Citation::quote).toList());
+        assertTrue(options.prompt().contains(qualifier));
+        assertEquals(4, options.spans(selected).getFirst().start());
+        var citation = options.citations().values().iterator().next();
+        var passages = List.of(new ClaimSupportJudge.Passage(line, "Maintenance handbook\n" + line + "\n" + qualifier));
+        String unqualifiedClaim = "The inspection interval is always 30 days.";
+        when(judge.judge(unqualifiedClaim, passages))
+                .thenReturn(new ClaimSupportJudge.Judgment(SupportStatus.INSUFFICIENT, "Applies only during trial."));
+        var checked = verifier.verifyStrict("C1", unqualifiedClaim, List.of(citation), selected, Set.of(id));
+        assertEquals(SourceStatus.MATCHED, checked.evidences().getFirst().sourceStatus());
+        assertEquals(line, checked.evidences().getFirst().quote());
+        assertEquals(SupportStatus.INSUFFICIENT, checked.claim().supportStatus());
+        org.mockito.Mockito.verify(judge).judge(unqualifiedClaim, passages);
+    }
+
+    @Test void searchablePdfStillRejectsAnIncompleteSentence() throws Exception {
+        String line = "Inspection interval is 30 days";
+        byte[] bytes = pdfWithTextLines(RenderingMode.FILL, "Maintenance handbook", line, "but only during trial.");
+        String id = DigestUtils.md5DigestAsHex(bytes);
+        var storage = mock(DocumentStorage.class);
+        when(storage.load(id)).thenReturn(Optional.of(new DocumentStorage.StoredDocument(id, "manual.pdf", bytes)));
+        var row = persisted(id);
+        row.setFileName("manual.pdf");
+        row.setPageStart(1);
+        row.setContent(line);
+        when(chunks.findById("c")).thenReturn(Optional.of(row));
+        var selected = List.of(new RetrievedChunk("c", id, "manual.pdf", line, null, 1, 1, 0, 1));
+        var verifier = new ClaimVerifier(chunks, judge,
+                new OriginalPassages(storage, new PdfDocumentParser(new TableTextEnhancer()), null, null));
+        assertTrue(verifier.evidenceOptions(selected).citations().isEmpty());
+    }
+
+    @Test void keepsOcrDecimalAndAreaUnitBoundToTheClaim() {
+        String quote = "造林面积为 28 ． 7 万亩 ，";
+        var passages = List.of(new StructuredEvidence.Passage(quote, quote, quote, true));
+        assertNull(StructuredEvidence.insufficiency("造林面积为28.7万亩。", passages));
+        assertNotNull(StructuredEvidence.insufficiency("造林面积为28.7公顷。", passages));
+        assertNotNull(StructuredEvidence.insufficiency("造林面积为7万亩。", passages));
+        String item = "1 ． 7 万亩新增面积";
+        assertNotNull(StructuredEvidence.insufficiency("新增面积为1.7万亩。",
+                List.of(new StructuredEvidence.Passage(item, item, item, true))));
+    }
+
+    private static byte[] pdfWithTextLines(RenderingMode mode, String... lines) throws Exception {
+        var bytes = new ByteArrayOutputStream();
+        try (var document = new PDDocument()) {
+            var page = new PDPage();
+            document.addPage(page);
+            try (var content = new PDPageContentStream(document, page)) {
+                content.beginText();
+                content.setFont(new PDType1Font(Standard14Fonts.FontName.HELVETICA), 12);
+                content.setRenderingMode(mode);
+                content.newLineAtOffset(60, 700);
+                for (String line : lines) {
+                    content.showText(line);
+                    content.newLineAtOffset(0, -16);
+                }
+                content.endText();
+            }
+            document.save(bytes);
+        }
+        return bytes.toByteArray();
     }
     final DocumentChunkJpaRepository chunks = mock(DocumentChunkJpaRepository.class);
     final ClaimSupportJudge judge = mock(ClaimSupportJudge.class);
