@@ -220,7 +220,6 @@ roch/
 │   │   ├── application.properties
 │   │   └── logback-spring.xml
 │   └── src/test/java/                    # Unit tests
-├── plan/                                 # Requirements and Design Documents
 │   ├── multi-turn-chat/                  # Multi-turn conversation implementation plan
 │   ├── recalled-document/                # Retrieval log feature plan
 │   └── semantic-chunking/                # Semantic chunking enhancement plan
@@ -255,7 +254,7 @@ roch/
 
 ## Roadmap
 
-See each phase implementation plan in the `plan/` directory:
+The chunking roadmap covers the following phases:
 
 - **Plan 01**: Chunking versioning and evaluation baseline
 - **Plan 02**: Heading and chapter-aware chunking
