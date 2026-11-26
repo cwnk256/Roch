@@ -219,7 +219,7 @@ server {
     server_name your-domain.example;
     root /srv/roch/web/dist;
     index index.html;
-    client_max_body_size 10m;
+    client_max_body_size 51m;
 
     location / {
         try_files $uri $uri/ /index.html;
@@ -279,7 +279,7 @@ server {
 | `rag.chunking.pipeline-version / strategy` | `heading-aware-v2 / heading-aware-v1` | 策略变动后使用新版本重建 |
 | `rag.chunking.similarity-threshold / min-chunk-size / max-chunk-size / embed-batch-size` | `0.35 / 50 / 1000 / 32` | 调整语义切片和嵌入批次，之后检查重建结果 |
 | `rag.cleaning.enabled / lowercase / filter-toc` | 均为 `true` | 清洗、索引文本大小写和目录过滤 |
-| `spring.servlet.multipart.max-file-size / max-request-size` | 均为 `10MB` | 上传限制，同时调整代理请求体限制 |
+| `spring.servlet.multipart.max-file-size / max-request-size` | `50MB / 51MB` | 单个文件最多 50 MB，请求上限包含 multipart 表单开销。修改后重启后端，并同步代理的请求体上限 |
 | `rag.page.engine / rag.page.firecrawl.api-key` | `auto`、`FIRECRAWL_API_KEY` 可为空 | 网页渲染与外部抓取需求 |
 | `amap.geo.key / amap.weather.key` | `AMAP_GEO_KEY / AMAP_WEATHER_KEY`，默认空 | 启用高德工具 |
 | `rag.retrieval.log.enabled / preview-chars` | `true / 0` | 检索日志和摘录预览，分享日志前检查敏感内容 |
