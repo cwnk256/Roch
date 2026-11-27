@@ -53,7 +53,7 @@ const activeView = ref<'create' | 'history' | 'detail'>('create');
 const creationStep = ref(0);
 const detailView = ref<'report' | 'exports'>('report');
 const artifactPage = ref(0);
-const artifactPageSize = 4;
+const artifactPageSize = 10;
 const visibleArtifacts = computed(() => paginateItems(artifacts.value, artifactPageSize, artifactPage.value));
 const stepTitles = ['选择资料', '生成要求', '导出设置'];
 const selectedDimensions = computed(() => dimensions.value.split(/[，,、\n]/).map(value => value.trim()).filter(Boolean));
@@ -110,23 +110,33 @@ async function loadDocuments(page = documentPage.value): Promise<void> {
 }
 const taskPage = ref(0);
 const taskPageSize = 10;
-const visibleTasks = computed(() => paginateItems(tasks.value, taskPageSize, taskPage.value));
-watch(tasks, ts => {
-  const pageCount = Math.ceil(ts.length / taskPageSize);
-  if (taskPage.value >= pageCount) taskPage.value = Math.max(pageCount - 1, 0)
+const taskTotal = ref(0);
+let taskRequest = 0;
+async function loadTasks(page = taskPage.value): Promise<void> {
+  const request = ++taskRequest;
+  try {
+    const response = await api.listTasks({page, size: taskPageSize});
+    if (request !== taskRequest || disposed) return;
+    const lastPage = Math.max(0, Math.ceil(response.total / taskPageSize) - 1);
+    if (page > lastPage) return loadTasks(lastPage);
+    tasks.value = response.content;
+    taskPage.value = response.page;
+    taskTotal.value = response.total
+  } catch (e) {
+    if (request === taskRequest && !disposed) error.value = errText(e)
+  }
+}
+watch(activeView, view => {
+  if (view === 'history') void loadTasks()
 });
 
-async function load() {
-  try {
-    error.value = '';
-    void loadDocuments();
-    if (!templates.value.length) {
-      void api.templates().then(data => { templates.value = data }).catch(e => { error.value = errText(e) })
-    }
-    tasks.value = (await api.listTasks({page: 0, size: 50})).content || []
-  } catch (e) {
-    error.value = String(e)
+function load() {
+  error.value = '';
+  void loadDocuments();
+  if (!templates.value.length) {
+    void api.templates().then(data => { templates.value = data }).catch(e => { error.value = errText(e) })
   }
+  if (activeView.value === 'history') void loadTasks()
 }
 
 async function create() {
@@ -182,8 +192,7 @@ function open(task: Task) {
     if (generation !== active || snapshot.taskId !== id) return false;
     selectedTask.value = snapshot;
     const index = tasks.value.findIndex(item => item.taskId === id);
-    if (index < 0) tasks.value.unshift(snapshot);
-    else tasks.value[index] = snapshot;
+    if (index >= 0) tasks.value[index] = snapshot;
     if (snapshot.status === 'PENDING' || snapshot.status === 'RUNNING') return true;
     stream?.close();
     stream = null;
@@ -381,9 +390,9 @@ onUnmounted(() => { disposed = true; stopWatching() })
     </section>
 
     <section v-show="activeView==='history'" class="panel workspace-panel history-panel" aria-label="任务历史">
-      <div class="section-heading panel-heading"><h3>任务历史</h3><span>{{ tasks.length }} 条</span></div>
+      <div class="section-heading panel-heading"><h3>任务历史</h3><span>{{ taskTotal }} 条</span></div>
       <div v-if="tasks.length" class="history-scroll"><div class="result-list">
-        <div v-for="t in visibleTasks" :key="t.taskId" class="result-item task-history-item" :class="{'is-active': selectedTask?.taskId === t.taskId}">
+        <div v-for="t in tasks" :key="t.taskId" class="result-item task-history-item" :class="{'is-active': selectedTask?.taskId === t.taskId}">
           <button class="task-history-main" type="button" @click="open(t)"><strong>{{ t.title || t.taskId }}</strong>
             <p>
               <StatusBadge :value="t.status"/>
@@ -396,8 +405,7 @@ onUnmounted(() => { disposed = true; stopWatching() })
           </button>
         </div>
         </div></div>
-        <PaginationControl v-if="tasks.length" :page="taskPage" :size="taskPageSize" :total="tasks.length"
-                           @change="taskPage=$event"/>
+        <PaginationControl :page="taskPage" :size="taskPageSize" :total="taskTotal" @change="loadTasks"/>
       <EmptyState v-if="!tasks.length" title="还没有报告任务"/>
     </section>
 

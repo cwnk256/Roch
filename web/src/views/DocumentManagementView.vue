@@ -16,6 +16,9 @@ const loading = ref(false)
 const error = ref('')
 const selected = ref<DocumentMeta | null>(null)
 const chunks = ref<Record<string, unknown>[]>([])
+const chunkPage = ref(0)
+const chunkTotal = ref(0)
+let chunkRequest = 0
 
 async function load(nextPage = page.value) {
   loading.value = true
@@ -33,17 +36,38 @@ async function load(nextPage = page.value) {
 }
 
 function search() {
-  selected.value = null
-  chunks.value = []
+  resetPreview()
   load(0)
 }
 
-async function inspect(document: DocumentMeta) {
+function resetPreview(document: DocumentMeta | null = null) {
+  chunkRequest++
   selected.value = document
+  chunks.value = []
+  chunkPage.value = 0
+  chunkTotal.value = 0
+}
+
+function inspect(document: DocumentMeta) {
+  resetPreview(document)
+  void loadChunks(0)
+}
+
+async function loadChunks(nextPage: number): Promise<void> {
+  const documentId = selected.value?.documentId
+  if (!documentId) return
+  const request = ++chunkRequest
+  error.value = ''
   try {
-    chunks.value = (await api.chunks(document.documentId, {page: 0, size: 8})).content || []
+    const result = await api.chunks(documentId, {page: nextPage, size: pageSize})
+    if (request !== chunkRequest) return
+    const lastPage = Math.max(0, Math.ceil(result.total / pageSize) - 1)
+    if (nextPage > lastPage) return loadChunks(lastPage)
+    chunks.value = result.content || []
+    chunkPage.value = result.page
+    chunkTotal.value = result.total
   } catch (e) {
-    error.value = String(e)
+    if (request === chunkRequest) error.value = String(e)
   }
 }
 
@@ -51,6 +75,7 @@ async function remove(document: DocumentMeta) {
   if (!confirm(`Delete ${document.fileName}?`)) return
   try {
     await api.deleteDocument(document.documentId)
+    if (selected.value?.documentId === document.documentId) resetPreview()
     await load(docs.value.length === 1 && page.value > 0 ? page.value - 1 : page.value)
   } catch (e) {
     error.value = String(e)
@@ -114,11 +139,12 @@ onMounted(load)
     <div class="panel" style="padding:18px">
       <template v-if="selected"><h3 style="margin-top:0">{{ selected.fileName }}</h3>
         <p class="muted" style="font-size:12px">{{ selected.documentId }}</p>
-        <div class="section-heading"><h3>Chunk preview</h3><span>{{ chunks.length }} items</span></div>
+        <div class="section-heading"><h3>Chunk preview</h3><span>{{ chunkTotal }} items</span></div>
         <div class="result-list">
           <div v-for="(chunk, index) in chunks" :key="index" class="result-item"><p>
             {{ chunk.content || chunk.text || JSON.stringify(chunk) }}</p></div>
         </div>
+        <PaginationControl :page="chunkPage" :size="pageSize" :total="chunkTotal" @change="loadChunks"/>
       </template>
       <EmptyState v-else message="Chunk content appears here" title="Select a document"/>
     </div>

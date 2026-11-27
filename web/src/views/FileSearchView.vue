@@ -1,13 +1,19 @@
 <script lang="ts" setup>
-import {ref} from 'vue'
+import {computed, ref} from 'vue'
 import {Search} from 'lucide-vue-next'
 import {api} from '../api'
 import {normalizeSearchResults} from '../lib/fileSearch'
+import {paginateItems} from '../lib/pagination'
 import type {SearchResponse} from '../types'
 import EmptyState from '../components/EmptyState.vue'
 import LoadingBlock from '../components/LoadingBlock.vue'
+import PaginationControl from '../components/PaginationControl.vue'
 
 const query = ref(''), topK = ref(8), loading = ref(false), error = ref(''), response = ref<SearchResponse | null>(null)
+const pageSize = 10
+const resultPage = ref(0)
+const rows = computed(() => normalizeSearchResults(response.value))
+const visibleRows = computed(() => paginateItems(rows.value, pageSize, resultPage.value))
 
 async function search() {
   if (!query.value.trim()) return;
@@ -15,15 +21,12 @@ async function search() {
   error.value = '';
   try {
     response.value = await api.search({query: query.value, topK: topK.value, threshold: .35, documentIds: []})
+    resultPage.value = 0
   } catch (e) {
     error.value = String(e)
   } finally {
     loading.value = false
   }
-}
-
-function rows() {
-  return normalizeSearchResults(response.value)
 }
 </script>
 <template>
@@ -59,12 +62,12 @@ function rows() {
   <div v-else-if="response" class="panel" style="padding:18px">
     <div class="section-heading">
       <h3>Results</h3>
-      <span>{{ rows().length }} items</span></div>
-    <div v-if="rows().length" class="result-list">
-      <article v-for="(row, i) in rows()" :key="row.documentId || i" class="result-item">
+      <span>{{ rows.length }} items</span></div>
+    <div v-if="rows.length" class="result-list">
+      <article v-for="(row, i) in visibleRows" :key="row.documentId || i" class="result-item">
         <div class="section-heading">
           <strong>
-            {{ row.fileName || row.documentId || `Result ${i + 1}` }}
+            {{ row.fileName || row.documentId || `Result ${resultPage * pageSize + i + 1}` }}
           </strong>
           <span>
           {{ row.hitCount || row.chunks.length }} hits · {{ ((row.score || 0) * 100).toFixed(1) }}%
@@ -79,9 +82,9 @@ function rows() {
       </article>
     </div>
     <EmptyState v-else message="Try another question" title="No results"/>
+    <PaginationControl :page="resultPage" :size="pageSize" :total="rows.length" @change="resultPage = $event"/>
   </div>
   <div v-else class="panel">
     <EmptyState message="Results will appear here" title="Ask a question to search"/>
   </div>
 </template>
-
