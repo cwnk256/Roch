@@ -104,6 +104,26 @@ docker compose ps
 
 Compose 中 Milvus 镜像使用镜像代理地址 `docker.1ms.run/milvusdb/milvus:v3.0.1`。该代理在部署网络中是否可用不确定；拉取失败时，可将 `standalone.image` 改为部署网络可以访问的同版本镜像地址，并重新核对启动与健康状态。
 
+### 可选服务 · 扫描 PDF OCR
+
+从现有「导入文档」页面上传原始 PDF。带可用文字的普通 PDF 直接导入，扫描页与混合页中的扫描区域进入后台识别。任务展示排队、物理页识别进度、索引和失败状态，失败后可从同一任务重试。
+
+在项目根目录构建并启动本机 PaddleOCR PP-StructureV3 服务。首次构建需要下载镜像、依赖和固定校验值的模型。启动后的识别使用镜像内预置模型。
+
+```bash
+docker compose -f compose.ocr.yaml config --quiet
+docker compose -f compose.ocr.yaml up -d --build
+curl http://127.0.0.1:18765/health
+```
+
+健康检查返回 `{"status":"ready"}` 后，在启动或重启后端前设置 `RAG_OCR_ENABLED=true`。服务通过本机回环地址接收渲染页。后续嵌入和报告生成配置本机模型服务时，识别出的文本也留在本机。端口冲突时设置 `ROCH_OCR_PORT`，并同步设置后端的 `RAG_OCR_BASE_URL`。常规文字 PDF 可在 OCR 关闭时导入。也可用本机 OCRmyPDF 制作带文字层的副本再上传，扫描表格的行列关系需单独核对。[OCRmyPDF 用法](https://ocrmypdf.readthedocs.io/en/stable/cookbook.html)
+
+调用方可在 `POST /api/documents/pdf` 上加 `?ocr=auto` 启用检测。普通 PDF 响应沿用原格式。需要识别时返回 HTTP 202 和 `jobId`，使用 `GET /api/documents/pdf-imports/{jobId}` 查询，使用 `POST /api/documents/pdf-imports/{jobId}/retry` 重试失败任务。
+
+OCR 引文保留原始 PDF 的物理页，表格引文可打开原页并显示单元格区域。扫描表格的结构化结论由 `full-v2` 核验，行列、单位或置信度不足时需查看原页复核。全局默认检索策略仍为 `baseline`。
+
+备份原件目录时一并保留文档的 `ocr/` 存档和已有报告。失败或排队中的上传字节暂存在 PostgreSQL，任务成功后释放。日志记录识别耗时、失败页与待复核数量。原件、OCR 存档和引用快照适用同一文档数据保留要求。
+
 ### 准备模型服务
 
 在 LM Studio 中准备生成模型与嵌入模型，启用 OpenAI 兼容服务。应用当前配置使用：
@@ -267,7 +287,9 @@ server {
 | `spring.ai.vectorstore.milvus.embeddingDimension` | `1024` | 与实际嵌入输出维度一致 |
 | `spring.ai.vectorstore.milvus.initialize-schema` | `true` | 启动时创建集合，已有集合仍需兼容模型 |
 | `server.address / server.port` | 本地部署示例限制 `127.0.0.1`，默认端口 `8080` | 对外监听、端口冲突或反向代理变化 |
-| `rag.document.storage-dir` | `data/documents` | 原件路径，建议为部署实例指定绝对目录 |
+| `rag.document.storage-dir` | `data/documents` | 原件及 OCR 存档，建议为部署实例指定绝对目录 |
+| `rag.ocr.enabled / base-url` | `false / http://127.0.0.1:18765` | 按需开启扫描 PDF 导入，重启后生效 |
+| `rag.ocr.render-dpi / page-timeout-seconds` | `200 / 180` | OCR 渲染分辨率与单页识别超时，重启后生效 |
 | `rag.document-task.output-dir` | `data/reports` | 结果 JSON 与 PDF 的目录 |
 | `rag.document-task.font-path` | `classpath:fonts/NotoSansSC-Regular.ttf` | 换字体时提供应用可读路径并验证中文导出 |
 | `rag.document-task.max-context-chars` | `24000` | 协调模型上下文长度；它是字符预算，不是 token 数 |

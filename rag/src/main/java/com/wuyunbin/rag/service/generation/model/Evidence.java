@@ -2,6 +2,8 @@ package com.wuyunbin.rag.service.generation.model;
 
 import com.wuyunbin.rag.dto.RetrievedChunk;
 
+import java.util.List;
+
 /**
  * 证据（引用）：标记一段生成正文来源于哪个文档的哪个切片。
  *
@@ -33,8 +35,18 @@ public record Evidence(
         String textHash,
         Integer chunkIndex,
         String attemptedQuote,
-        String nativeLocation
+        String nativeLocation,
+        OcrLocation ocr
 ) {
+    public record OcrLocation(List<Double> region, TableLocation table, boolean reviewRequired) {}
+    public record TableLocation(Integer row, Integer column) {}
+
+    public Evidence(String documentId, String fileName, String chunkId, String section, Integer pageStart,
+                    Integer pageEnd, double score, String evidenceId, String quote, SourceStatus sourceStatus,
+                    String pipelineVersion, String textHash, Integer chunkIndex, String attemptedQuote, String nativeLocation) {
+        this(documentId, fileName, chunkId, section, pageStart, pageEnd, score, evidenceId, quote, sourceStatus,
+                pipelineVersion, textHash, chunkIndex, attemptedQuote, nativeLocation, null);
+    }
     public Evidence(String documentId, String fileName, String chunkId, String section, Integer pageStart,
                     Integer pageEnd, double score, String evidenceId, String quote, SourceStatus sourceStatus,
                     String pipelineVersion, String textHash, Integer chunkIndex, String attemptedQuote) {

@@ -12,6 +12,9 @@ public interface DocumentChunkJpaRepository extends JpaRepository<DocumentChunkE
 
     List<DocumentChunkEntity> findByDocMd5(String docMd5);
 
+    @Query("SELECT DISTINCT c.pipelineVersion FROM DocumentChunkEntity c WHERE c.docMd5 = :docMd5")
+    List<String> findPipelineVersions(@Param("docMd5") String docMd5);
+
     List<DocumentChunkEntity> findTop4ByDocMd5AndPageStartAndChunkIndexOrderByChunkIdAsc(
             String docMd5, Integer pageStart, Integer chunkIndex);
 

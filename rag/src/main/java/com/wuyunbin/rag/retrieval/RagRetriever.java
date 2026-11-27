@@ -2,6 +2,8 @@ package com.wuyunbin.rag.retrieval;
 
 import com.wuyunbin.rag.cleaning.CleaningProperties;
 import com.wuyunbin.rag.cleaning.TextNormalizer;
+import com.wuyunbin.rag.service.ocr.OcrIndexPublication;
+import org.springframework.beans.factory.annotation.Autowired;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.document.Document;
@@ -16,12 +18,17 @@ import java.util.List;
  */
 @Slf4j
 @Component
-@RequiredArgsConstructor
+@RequiredArgsConstructor(onConstructor_ = @Autowired)
 public class RagRetriever {
 
     private final VectorStore vectorStore;
     private final CleaningProperties cleaningProperties;
     private final TextNormalizer textNormalizer;
+    private final OcrIndexPublication ocrPublication;
+
+    public RagRetriever(VectorStore vectorStore, CleaningProperties cleaningProperties, TextNormalizer textNormalizer) {
+        this(vectorStore, cleaningProperties, textNormalizer, null);
+    }
 
     /**
      * 检索与查询相关的文档切片。
@@ -41,7 +48,8 @@ public class RagRetriever {
                 .topK(topK)
                 .similarityThreshold(threshold)
                 .build();
-        List<Document> results = vectorStore.similaritySearch(request);
+        List<Document> results = ocrPublication == null ? vectorStore.similaritySearch(request)
+                : ocrPublication.search(vectorStore, request);
         log.debug("检索完成 query={} topK={} threshold={} 命中{}条", normalizedQuery, topK, threshold, results.size());
         return results;
     }

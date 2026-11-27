@@ -22,7 +22,10 @@ record SectionEvidence(Attempt initial, Attempt retry, Map<Integer, String> ques
                 Citation citation = options.citations().get(id);
                 if (citation.physicalFacts() == null) continue;
                 for (String statement : citation.physicalFacts()) {
-                    if (!StructuredEvidence.exactlyAnswersTableQuestion(question, statement)) continue;
+                    boolean answers = citation.ocrTable() == null
+                            ? StructuredEvidence.exactlyAnswersTableQuestion(question, statement)
+                            : citation.ocrTable().answersQuestion(question);
+                    if (!answers) continue;
                     var row = List.of(Objects.toString(citation.tableCaption(), ""), citation.quote(), statement);
                     matches.putIfAbsent(row, new TableAnswer(statement, citation));
                 }

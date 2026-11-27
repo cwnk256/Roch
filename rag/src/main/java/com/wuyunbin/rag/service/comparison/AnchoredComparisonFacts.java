@@ -47,6 +47,7 @@ final class AnchoredComparisonFacts {
     private static final Pattern FRAGMENT = Pattern.compile("[。！？!?；;|\\r\\n]+|(?<!\\d),|,(?!\\d)");
     private static final Pattern QUANTITY = Pattern.compile("(?<![\\d.,+−-])" + NUMBER + "\\s*"
             + "(?:" + MONEY + "|" + DURATION + "|千克|公斤|克|千米|公里|米|毫米|升|毫升|箱|件|台|%)(?![0-9]|[.,][0-9])");
+    private static final Pattern TABLE_AMOUNT = Pattern.compile("^(" + NUMBER + ")\\s*([\\p{L}%％℃°]*)$");
     private static final Pattern NO_NUMERIC_FACT = Pattern.compile(
             "(?:没有|未(?:提供|记录|披露|注明|规定|给出)|不含)[^，,。；;！？!?]{0,24}$");
 
@@ -88,6 +89,14 @@ final class AnchoredComparisonFacts {
     }
 
     static Selection literal(ComparisonCellScope scope, Citation citation) {
+        var ocr = citation.ocrTable();
+        if (ocr != null) {
+            if (!matches(scope.dimension(), ocr.metric())) return null;
+            var quantity = TABLE_AMOUNT.matcher(ocr.amount());
+            if (!quantity.matches()) return null;
+            var candidate = candidate(citation, ocr.object(), "", "", ocr.metric(), quantity.group(1), quantity.group(2));
+            return new Selection(citation, candidate, true, ocr.statement());
+        }
         List<Selection> recognized = new ArrayList<>();
         // An Excel anchor preserves the physical row, including labels next to a narrative cell.
         String[] parts = citation.cellLocation() == null ? new String[]{citation.quote()} : citation.quote().split("\\|");
@@ -128,6 +137,7 @@ final class AnchoredComparisonFacts {
         if (citation == null || (type(scope.dimension()) != Type.ANY && type(scope.dimension()) != type)) return null;
         Selection literal = literal(scope, citation);
         if (literal != null) return scope.equipmentScope(literal.candidate().object()).permitted() ? literal : null;
+        if (citation.ocrTable() != null) return null;
         if (metric == null || metric.isBlank() || value == null || value.isBlank()) return null;
         boolean inDimension = type(scope.dimension()) == Type.ANY || matches(scope.dimension(), metric)
                 || type == Type.OBLIGATION && powerDimension(scope.dimension(), metric)

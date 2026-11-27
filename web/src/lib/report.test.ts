@@ -24,7 +24,7 @@ test('comparison reader distinguishes facts on the same page and flags unverifie
             ]}]}
         ]}
     }
-    const server = await createServer({server: {middlewareMode: true, hmr: false}})
+    const server = await createServer({optimizeDeps: {noDiscovery: true}, server: {middlewareMode: true, ws: false}})
     try {
         const reader = (await server.ssrLoadModule('/src/components/ReportReader.vue')).default
         const html = await renderToString(createSSRApp({render: () => h(reader, {report})}))
@@ -32,6 +32,37 @@ test('comparison reader distinguishes facts on the same page and flags unverifie
             '[A.pdf · 第 7 页 · 附件] [2]', '/api/documents/a%20b/file#page=7', '原文件当前不可用']) {
             assert.ok(html.includes(fragment), fragment)
         }
+    } finally {
+        await server.close()
+    }
+})
+
+test('OCR evidence labels the scan, offers a page preview, and links to the original physical PDF page', async () => {
+    const server = await createServer({optimizeDeps: {noDiscovery: true}, server: {middlewareMode: true, ws: false}})
+    try {
+        const reader = (await server.ssrLoadModule('/src/components/ReportReader.vue')).default
+        const {ocrPagePreview} = await server.ssrLoadModule('/src/lib/report.ts')
+        const snapshot = {
+            evidenceId: 'e1', documentId: 'a b', fileName: '扫描.pdf', chunkId: 'chunk', pageStart: 4,
+            ocr: {region: [0.125, 0.25, 0.625, 0.5], table: {row: 3, column: 2}, reviewRequired: true}
+        }
+        const report = {
+            schemaVersion: 'v2', summary: '', title: '扫描件报告', sections: [],
+            summaryClaims: [{claimId: 'c1', text: '表格金额', evidenceIds: ['e1'], supportStatus: 'SUPPORTED'}],
+            evidenceSnapshots: [snapshot],
+            currentSources: {e1: {originalAvailable: true}}
+        }
+        const html = await renderToString(createSSRApp({render: () => h(reader, {report})}))
+        for (const fragment of ['OCR 识别', '表格第 3 行第 2 列', '请核对扫描原页',
+            '查看第 4 页定位', '/api/documents/a%20b/file#page=4']) {
+            assert.ok(html.includes(fragment), fragment)
+        }
+        assert.deepEqual(ocrPagePreview(snapshot), {
+            url: '/api/documents/a%20b/pdf-pages/4',
+            highlight: {left: '12.5%', top: '25%', width: '50%', height: '25%'}
+        })
+        assert.equal(ocrPagePreview({...snapshot, ocr: undefined}), undefined)
+        assert.equal(ocrPagePreview({...snapshot, ocr: {...snapshot.ocr, region: [1, 0, 0, 1]}}), undefined)
     } finally {
         await server.close()
     }

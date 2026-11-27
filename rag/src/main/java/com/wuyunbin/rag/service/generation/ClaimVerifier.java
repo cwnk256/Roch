@@ -5,6 +5,7 @@ import com.wuyunbin.rag.persistence.chunk.DocumentChunkEntity;
 import com.wuyunbin.rag.persistence.chunk.DocumentChunkJpaRepository;
 import com.wuyunbin.rag.service.PdfDocumentParser.TableRow;
 import com.wuyunbin.rag.service.generation.model.*;
+import com.wuyunbin.rag.service.ocr.OcrPage;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
@@ -21,7 +22,13 @@ public class ClaimVerifier {
                            @com.fasterxml.jackson.annotation.JsonIgnore String cellLocation,
                            @com.fasterxml.jackson.annotation.JsonIgnore String nativeContext,
                            @com.fasterxml.jackson.annotation.JsonIgnore List<String> physicalFacts,
-                           @com.fasterxml.jackson.annotation.JsonIgnore String tableCaption) {
+                           @com.fasterxml.jackson.annotation.JsonIgnore String tableCaption,
+                           @com.fasterxml.jackson.annotation.JsonIgnore OcrPage.TableFact ocrTable) {
+        public Citation(int source, String quote, String cellLocation, String nativeContext,
+                        List<String> physicalFacts, String tableCaption) {
+            this(source, quote, cellLocation, nativeContext, physicalFacts, tableCaption, null);
+        }
+
         public Citation(int source, String quote, String cellLocation, String nativeContext) {
             this(source, quote, cellLocation, nativeContext, null, null);
         }
@@ -89,6 +96,15 @@ public class ClaimVerifier {
                 }
                 addOptions(options, sourceOptions);
                 continue;
+            }
+            if (pdf) {
+                var anchors = originals.ocrAnchors(hit.documentId(), row.getPipelineVersion(), row.getPageStart());
+                if (anchors.isEmpty()) continue;
+                for (var anchor : anchors.get()) {
+                    if (!matchesIndexedOcr(anchor.quote(), row, hit)) continue;
+                    List<String> facts = anchor.fact() == null ? null : List.of(anchor.fact());
+                    sourceOptions.add(new Citation(source, anchor.quote(), null, anchor.context(), facts, null, anchor.tableFact()));
+                }
             }
             var tableRows = pdf && row.getPageStart() != null
                     ? originals.tableRows(hit.documentId()).stream().filter(t -> t.page() == row.getPageStart()).toList()
@@ -265,7 +281,8 @@ public class ClaimVerifier {
         return Pattern.compile(expression, Pattern.UNICODE_CHARACTER_CLASS | Pattern.CASE_INSENSITIVE);
     }
     public record VerifiedClaim(Claim claim, List<Evidence> evidences) {}
-    private record Located(Evidence evidence, String context, String originalContext, boolean ocrText) {}
+    private record Located(Evidence evidence, String context, String originalContext, boolean ocrText,
+                           OcrPage.TableFact ocrTableFact) {}
 
     private static final Pattern WHITESPACE = Pattern.compile("\\s+", Pattern.UNICODE_CHARACTER_CLASS);
     private final DocumentChunkJpaRepository chunks;
@@ -331,9 +348,28 @@ public class ClaimVerifier {
             Located located = locate(hit, citation);
             Evidence snapshot = located.evidence();
             if (evidence.putIfAbsent(snapshot.evidenceId(), snapshot) != null) continue;
-            if (snapshot.sourceStatus() == SourceStatus.MATCHED && citation.physicalFacts() != null) {
-                String statement = compact(text).replaceFirst("[。.]$", "");
-                if (!citation.physicalFacts().stream().map(ClaimVerifier::compact).anyMatch(statement::equals)) {
+            var ocr = snapshot.ocr();
+            if (ocr != null && ocr.reviewRequired()) {
+                invalid = true;
+                failure = "OCR 识别或表格位置需要查看原页复核。";
+                continue;
+            }
+            if (ocr != null && ocr.table() != null && (!strict || citation.ocrTable() == null)) {
+                invalid = true;
+                failure = "扫描表格的结构化结论需要启用 full-v2 逐项核验。";
+                continue;
+            }
+            List<String> physicalFacts = citation.physicalFacts();
+            if (ocr != null) {
+                var tableFact = located.ocrTableFact();
+                physicalFacts = tableFact == null ? null : List.of(
+                        literalFieldsProven ? tableFact.comparisonStatement() : tableFact.statement());
+            }
+            if (snapshot.sourceStatus() == SourceStatus.MATCHED && physicalFacts != null) {
+                java.util.function.UnaryOperator<String> normalize = ocr == null ? ClaimVerifier::compact
+                        : phrase -> WHITESPACE.matcher(phrase).replaceAll("");
+                String statement = normalize.apply(text).replaceFirst("[。.]$", "");
+                if (physicalFacts.stream().map(normalize).noneMatch(statement::equals)) {
                     invalid = true;
                     failure = "陈述未与同一物理行列的对象、指标和数值逐项对应。";
                 } else {
@@ -393,7 +429,31 @@ public class ClaimVerifier {
         String originalContext = null;
         String nativeLocation = null;
         boolean ocrText = false;
-        if (available && citation.nativeContext() != null && citation.cellLocation() == null && originals != null) {
+        Evidence.OcrLocation ocr = null;
+        OcrPage.TableFact ocrFact = null;
+        if (available && originals != null) {
+            var anchors = originals.ocrAnchors(hit.documentId(), row.getPipelineVersion(), row.getPageStart());
+            available = anchors.isPresent();
+            if (available && matchesIndexedOcr(proposed, row, hit)) {
+                var matched = matchOcr(anchors.get(), proposed);
+                if (matched != null) {
+                    quote = NativeTextSpan.find(matched.quote(), proposed).quote();
+                    originalContext = matched.context();
+                    ocrText = true;
+                    boolean fullCell = matched.quote().equals(quote);
+                    boolean review = matched.reviewRequired() || matched.table() && !fullCell;
+                    var cell = matched.table() ? new Evidence.TableLocation(matched.row(), matched.column()) : null;
+                    ocr = new Evidence.OcrLocation(matched.box(), cell, review);
+                    if (!review) ocrFact = matched.tableFact();
+                    nativeLocation = "OCR 识别";
+                    if (cell != null && cell.row() != null && cell.column() != null) {
+                        nativeLocation += " · 第 " + cell.row() + " 行，第 " + cell.column() + " 列";
+                    }
+                    if (review) nativeLocation += " · 待复核";
+                }
+            }
+        }
+        if (quote == null && available && citation.nativeContext() != null && citation.cellLocation() == null && originals != null) {
             boolean pdf = Objects.toString(row.getFileName(), "").toLowerCase(Locale.ROOT).endsWith(".pdf");
             String page = pdf ? originals.nativePdfPage(hit.documentId(), row.getPageStart()) : originals.nativeOfficeOrText(hit.documentId());
             available = page != null && !page.isEmpty();
@@ -408,7 +468,7 @@ public class ClaimVerifier {
                 if (tableId != null) nativeLocation += "（表" + tableId + "）";
 
             }
-        } else if (available && proposed != null && !proposed.isBlank() && proposed.length() <= 1000) {
+        } else if (quote == null && available && proposed != null && !proposed.isBlank() && proposed.length() <= 1000) {
             var pattern = quotePattern(proposed);
             var sourceMatch = pattern.matcher(row.getContent());
             if (hit.content() != null && pattern.matcher(hit.content()).find() && sourceMatch.find()) {
@@ -441,10 +501,26 @@ public class ClaimVerifier {
         Evidence snapshot = new Evidence(hit.documentId(), available ? row.getFileName() : hit.fileName(),
                 hit.chunkId(), citation.cellLocation() != null && quote != null ? citation.cellLocation() : available ? row.getSectionPath() : null, available ? row.getPageStart() : null,
                 available ? row.getPageEnd() : null, hit.score(), id, quote, status,
-                available ? row.getPipelineVersion() : null, hash, available ? row.getChunkIndex() : null, attempted, nativeLocation);
-        String context = citation.cellLocation() != null ? originalContext : available ? row.getContent() : null;
-        if (quote != null && hasOcrContext(citation)) context = citation.nativeContext();
-        return new Located(snapshot, context, originalContext, ocrText);
+                available ? row.getPipelineVersion() : null, hash, available ? row.getChunkIndex() : null, attempted, nativeLocation, ocr);
+        String context = citation.cellLocation() != null || ocr != null ? originalContext : available ? row.getContent() : null;
+        if (quote != null && ocr == null && hasOcrContext(citation)) context = citation.nativeContext();
+        return new Located(snapshot, context, originalContext, ocrText, ocrFact);
+    }
+
+    private static boolean matchesIndexedOcr(String proposed, DocumentChunkEntity row, RetrievedChunk hit) {
+        return proposed != null && proposed.length() >= 2 && proposed.length() <= 1000
+                && NativeTextSpan.find(row.getContent(), proposed) != null
+                && NativeTextSpan.find(hit.content(), proposed) != null;
+    }
+
+    private static OcrPage.Anchor matchOcr(List<OcrPage.Anchor> anchors, String quote) {
+        var exact = anchors.stream().filter(anchor -> anchor.quote().equals(quote)).findFirst();
+        if (exact.isPresent()) return exact.get();
+        var matches = anchors.stream().filter(anchor -> NativeTextSpan.find(anchor.quote(), quote) != null).toList();
+        if (matches.size() == 1) return matches.getFirst();
+        if (matches.isEmpty()) return null;
+        return new OcrPage.Anchor(quote, null, null, null, matches.stream().anyMatch(OcrPage.Anchor::table),
+                true, null, quote);
     }
 
     public static String hashText(String text) {

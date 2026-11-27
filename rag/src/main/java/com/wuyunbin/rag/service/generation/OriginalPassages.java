@@ -3,8 +3,10 @@ package com.wuyunbin.rag.service.generation;
 import com.wuyunbin.rag.service.ExcelDocumentParser;
 import com.wuyunbin.rag.service.PdfDocumentParser;
 import com.wuyunbin.rag.service.WordDocumentParser;
+import com.wuyunbin.rag.service.ocr.OcrArtifactStore;
+import com.wuyunbin.rag.service.ocr.OcrPage;
 import com.wuyunbin.rag.service.storage.DocumentStorage;
-import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.io.ByteArrayInputStream;
@@ -13,23 +15,79 @@ import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.List;
+import java.util.Optional;
 import java.util.regex.Pattern;
 
 /** Holds parsed originals only during a single worker's report generation. */
 @Component
-@RequiredArgsConstructor
 public class OriginalPassages {
     private final DocumentStorage storage;
     private final PdfDocumentParser pdf;
     private final WordDocumentParser word;
     private final ExcelDocumentParser excel;
+    private final OcrArtifactStore ocrArtifacts;
+    private final ThreadLocal<Map<OcrKey, Optional<Map<Integer, List<OcrPage.Anchor>>>>> taskOcr = new ThreadLocal<>();
+
+    public OriginalPassages(DocumentStorage storage, PdfDocumentParser pdf, WordDocumentParser word,
+                            ExcelDocumentParser excel) {
+        this(storage, pdf, word, excel, null);
+    }
+
+    @Autowired
+    public OriginalPassages(DocumentStorage storage, PdfDocumentParser pdf, WordDocumentParser word,
+                            ExcelDocumentParser excel, OcrArtifactStore ocrArtifacts) {
+        this.storage = storage;
+        this.pdf = pdf;
+        this.word = word;
+        this.excel = excel;
+        this.ocrArtifacts = ocrArtifacts;
+    }
     private final ThreadLocal<Map<String, Map<Integer, String>>> taskSources = new ThreadLocal<>();
 
     private final ThreadLocal<Map<String, java.util.List<ExcelDocumentParser.NativeRow>>> taskSheets = new ThreadLocal<>();
     private final ThreadLocal<Map<String, PdfDocumentParser.NativeLayout>> taskTables = new ThreadLocal<>();
     private final ThreadLocal<Map<String,String>> taskNativeTexts = new ThreadLocal<>();
-    public void beginTask() { taskSources.set(new HashMap<>()); taskSheets.set(new HashMap<>()); taskTables.set(new HashMap<>()); taskNativeTexts.set(new HashMap<>()); }
-    public void endTask() { taskSources.remove(); taskSheets.remove(); taskTables.remove(); taskNativeTexts.remove(); }
+    public void beginTask() {
+        taskSources.set(new HashMap<>());
+        taskSheets.set(new HashMap<>());
+        taskTables.set(new HashMap<>());
+        taskNativeTexts.set(new HashMap<>());
+        taskOcr.set(new HashMap<>());
+    }
+
+    public void endTask() {
+        taskSources.remove();
+        taskSheets.remove();
+        taskTables.remove();
+        taskNativeTexts.remove();
+        taskOcr.remove();
+    }
+
+    private record OcrKey(String documentId, String version) {}
+
+    Optional<List<OcrPage.Anchor>> ocrAnchors(String id, String version, Integer page) {
+        if (!OcrArtifactStore.isOcrVersion(version) || page == null) return Optional.of(List.of());
+        var key = new OcrKey(id, version);
+        var cache = taskOcr.get();
+        var artifact = cache == null ? loadOcr(key) : cache.computeIfAbsent(key, this::loadOcr);
+        return artifact.map(pages -> pages.getOrDefault(page, List.of()));
+    }
+
+    private Optional<Map<Integer, List<OcrPage.Anchor>>> loadOcr(OcrKey key) {
+        if (ocrArtifacts == null) return Optional.empty();
+        try {
+            var original = storage.load(key.documentId());
+            if (original.isEmpty()) return Optional.empty();
+            return ocrArtifacts.load(original.get(), key.version()).map(archive -> {
+                Map<Integer, List<OcrPage.Anchor>> pages = new HashMap<>();
+                for (OcrPage page : archive) pages.put(page.page(), page.anchors());
+                return Map.copyOf(pages);
+            });
+        } catch (IOException | RuntimeException unavailable) {
+            return Optional.empty();
+        }
+    }
 
     record Match(boolean available, String quote, String context) {}
 

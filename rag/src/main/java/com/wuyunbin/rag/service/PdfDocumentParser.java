@@ -77,6 +77,12 @@ public class PdfDocumentParser {
     public record PdfPage(int number, String content) {}
 
     public List<PdfPage> parsePages(InputStream inputStream) throws IOException {
+        var pages = parsePagesAllowEmpty(inputStream);
+        if (pages.isEmpty()) throw new IOException("PDF 文档正文内容为空");
+        return pages;
+    }
+
+    public List<PdfPage> parsePagesAllowEmpty(InputStream inputStream) throws IOException {
         try (PDDocument document = Loader.loadPDF(inputStream.readAllBytes())) {
             Map<Integer, List<LineInfo>> pages = new LinkedHashMap<>();
             LineCollectingStripper collector = new LineCollectingStripper(pages);
@@ -88,7 +94,6 @@ public class PdfDocumentParser {
                     .map(page -> new PdfPage(page.getKey(), buildMarkdown(page.getValue(), bodySize)))
                     .filter(page -> !page.content().isBlank())
                     .toList();
-            if (result.isEmpty()) throw new IOException("PDF 文档正文内容为空");
             return result;
         }
     }

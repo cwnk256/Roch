@@ -10,6 +10,24 @@ export interface DocumentMeta {
     createdAt?: string
 }
 
+export interface DocumentImportResult {
+    chunkCount: number;
+    md5: string;
+    duplicated: boolean;
+    message: string
+}
+
+export interface PdfImportJob {
+    jobId: string;
+    documentId: string;
+    status: 'QUEUED' | 'RUNNING' | 'INDEXING' | 'SUCCEEDED' | 'FAILED';
+    currentPage: number;
+    totalPages: number;
+    failedPage?: number | null;
+    message?: string | null;
+    result?: DocumentImportResult | null
+}
+
 export interface PageResult<T> {
     content: T[];
     page: number;

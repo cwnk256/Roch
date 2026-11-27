@@ -10,6 +10,9 @@ import com.wuyunbin.rag.dto.DocumentResponse;
 import com.wuyunbin.rag.dto.DocumentStatus;
 import com.wuyunbin.rag.persistence.chunk.DocumentChunkEntity;
 import com.wuyunbin.rag.persistence.chunk.DocumentChunkJpaRepository;
+import com.wuyunbin.rag.service.ocr.OcrArtifactStore;
+import com.wuyunbin.rag.service.ocr.OcrIndexPublication;
+import com.wuyunbin.rag.service.ocr.OcrPage;
 import com.wuyunbin.rag.service.storage.DocumentStorage;
 import com.wuyunbin.rag.service.storage.DocumentStorage.StoredDocument;
 import io.milvus.client.MilvusServiceClient;
@@ -65,10 +68,22 @@ public class DocumentService {
     private final DocumentChunkJpaRepository chunkRepository;
     private final ChunkTokenizer chunkTokenizer;
     private final VectorCleanupJournal cleanupJournal;
+    private final OcrArtifactStore ocrArtifacts;
+    private final OcrIndexPublication ocrPublication;
     @Value("${spring.ai.vectorstore.milvus.collectionName:rag_docs}")
     private String collectionName;
     @Value("${spring.ai.vectorstore.milvus.databaseName:default}")
     private String databaseName;
+
+    public DocumentService(CleaningTextSplitter cleaningTextSplitter, VectorStore vectorStore,
+                           MilvusServiceClient milvusClient, ChunkingProperties chunkingProperties,
+                           WordDocumentParser wordDocumentParser, PdfDocumentParser pdfDocumentParser,
+                           ExcelDocumentParser excelDocumentParser, DocumentStorage documentStorage,
+                           DocumentChunkJpaRepository chunkRepository, ChunkTokenizer chunkTokenizer,
+                           VectorCleanupJournal cleanupJournal) {
+        this(cleaningTextSplitter, vectorStore, milvusClient, chunkingProperties, wordDocumentParser, pdfDocumentParser,
+                excelDocumentParser, documentStorage, chunkRepository, chunkTokenizer, cleanupJournal, null, null);
+    }
 
     @Autowired
     public DocumentService(CleaningTextSplitter cleaningTextSplitter, VectorStore vectorStore,
@@ -76,8 +91,11 @@ public class DocumentService {
                            WordDocumentParser wordDocumentParser, PdfDocumentParser pdfDocumentParser,
                            ExcelDocumentParser excelDocumentParser, DocumentStorage documentStorage,
                            DocumentChunkJpaRepository chunkRepository, ChunkTokenizer chunkTokenizer,
-                           VectorCleanupJournal cleanupJournal) {
+                           VectorCleanupJournal cleanupJournal, OcrArtifactStore ocrArtifacts,
+                           OcrIndexPublication ocrPublication) {
         this.cleanupJournal = cleanupJournal;
+        this.ocrArtifacts = ocrArtifacts;
+        this.ocrPublication = ocrPublication;
         this.cleaningTextSplitter = cleaningTextSplitter;
         this.vectorStore = vectorStore;
         this.milvusClient = milvusClient;
@@ -195,7 +213,20 @@ public class DocumentService {
         return indexSource(readUpload(file), false);
     }
 
+    @Transactional
+    public DocumentResponse importRecognizedPdf(StoredDocument source, List<OcrPage> pages) {
+        if (!"PDF".equals(fileType(source.fileName()))
+                || !DigestUtils.md5DigestAsHex(source.content()).equals(source.documentId())) {
+            throw new IllegalArgumentException("OCR 任务原件校验失败");
+        }
+        return indexSource(source, false, List.copyOf(pages));
+    }
+
     private DocumentResponse indexSource(StoredDocument source, boolean force) {
+        return indexSource(source, force, null);
+    }
+
+    private DocumentResponse indexSource(StoredDocument source, boolean force, List<OcrPage> recognized) {
         String md5 = source.documentId();
         String fileName = source.fileName();
         String type = fileType(fileName);
@@ -209,40 +240,77 @@ public class DocumentService {
         }
 
         chunkRepository.lockDocument(md5);
+        List<OcrPage> ocrPages = recognized == null ? List.of() : recognized;
+        List<String> indexedVersions = List.of();
+        if (type.equals("PDF") && ocrArtifacts != null) {
+            indexedVersions = chunkRepository.findPipelineVersions(md5);
+            try {
+                if (recognized != null) {
+                    version = ocrArtifacts.save(source, version, recognized);
+                } else {
+                    var archived = indexedVersions.stream().filter(OcrArtifactStore::isOcrVersion).findFirst();
+                    if (archived.isPresent()) {
+                        ocrPages = ocrArtifacts.load(source, archived.get()).orElseThrow();
+                        version = ocrArtifacts.save(source, version, ocrPages);
+                    }
+                }
+            } catch (IOException e) {
+                throw new IllegalStateException("OCR 存档读写失败: " + fileName, e);
+            }
+        }
+
         ImportDecision decision = resolveImportDecision(md5, version);
+        if (decision == ImportDecision.SKIP_CURRENT && OcrArtifactStore.isOcrVersion(version)
+                && !indexedVersions.contains(version)) {
+            // A rolled-back attempt may still have vectors awaiting cleanup.
+            decision = ImportDecision.REBUILD_NEW_VERSION;
+        }
         if (force && decision == ImportDecision.NEW_DOCUMENT && documentStorageMissing(md5)) {
             throw new IllegalStateException("文档不存在: " + md5);
         }
         if (!force && decision == ImportDecision.SKIP_CURRENT) {
             saveSource(source);
+            if (ocrPublication != null && !OcrArtifactStore.isOcrVersion(version)) ocrPublication.publish(md5, null);
             return new DocumentResponse(0, md5, true, "文件已存在，跳过重复导入");
         }
 
-        List<Document> chunks = prepareChunks(source, type, version);
+        List<Document> chunks = prepareChunks(source, type, version, ocrPages);
         if (chunks.isEmpty()) throw new IllegalArgumentException("文件没有可索引的正文: " + fileName);
         // 修复曾经只写入其中一侧的文档。物理向量 ID 与稳定的引用 chunk_id 分开。
         List<String> previousIds = decision == ImportDecision.NEW_DOCUMENT ? List.of() : vectorIds(md5);
         chunkRepository.deleteByDocMd5(md5);
         persistChunks(chunks, md5, fileName, version);
-        saveSource(source);
+        boolean recognizedPdf = OcrArtifactStore.isOcrVersion(version);
+        UUID generation = recognizedPdf && ocrPublication != null ? ocrPublication.markVectors(chunks) : null;
+        if (!recognizedPdf) saveSource(source);
         replaceVectors(md5, previousIds, chunks);
+        if (recognizedPdf) saveSource(source);
+        if (ocrPublication != null && type.equals("PDF")) ocrPublication.publish(md5, generation);
         return new DocumentResponse(chunks.size(), md5, false,
                 force || decision == ImportDecision.REBUILD_NEW_VERSION ? "已重新索引文档" : "导入成功");
     }
 
-    private List<Document> prepareChunks(StoredDocument source, String type, String version) {
+    private List<Document> prepareChunks(StoredDocument source, String type, String version, List<OcrPage> ocrPages) {
         Map<String, Object> metadata = Map.of("doc_md5", source.documentId(), "file_name", source.fileName(),
                 "file_size", (long) source.content().length, "created_at", LocalDateTime.now().toString());
         var input = new ByteArrayInputStream(source.content());
         try {
             if (type.equals("PDF")) {
                 List<Document> pages = new ArrayList<>();
-                for (var page : pdfDocumentParser.parsePages(input)) {
-                    Map<String, Object> pageMetadata = new HashMap<>(metadata);
-                    pageMetadata.put("page_start", page.number());
-                    pageMetadata.put("page_end", page.number());
-                    pages.add(new Document(page.content(), pageMetadata));
+                var contentByPage = new java.util.TreeMap<Integer, String>();
+                var nativePages = ocrPages.isEmpty() ? pdfDocumentParser.parsePages(input)
+                        : pdfDocumentParser.parsePagesAllowEmpty(input);
+                for (var page : nativePages) contentByPage.put(page.number(), page.content());
+                for (var page : ocrPages) {
+                    contentByPage.merge(page.page(), page.indexedText(), (nativeText, ocrText) -> nativeText + "\n\n" + ocrText);
                 }
+                contentByPage.forEach((number, content) -> {
+                    if (content.isBlank()) return;
+                    Map<String, Object> pageMetadata = new HashMap<>(metadata);
+                    pageMetadata.put("page_start", number);
+                    pageMetadata.put("page_end", number);
+                    pages.add(new Document(content, pageMetadata));
+                });
                 return cleaningTextSplitter.splitPages(pages, version);
             }
             String content = switch (type) {
@@ -339,14 +407,6 @@ public class DocumentService {
         return executeQuery(query).getRowCount() > 0;
     }
 
-    private int countChunks(String documentId) {
-        var query = QueryParam.newBuilder().withDatabaseName(databaseName).withCollectionName(collectionName)
-                .withConsistencyLevel(ConsistencyLevelEnum.STRONG)
-                .withExpr(documentFilter(documentId)).addOutField("count(*)").build();
-        Number count = (Number) executeQuery(query).getFieldWrapper("count(*)").getFieldData().getFirst();
-        return Math.toIntExact(count.longValue());
-    }
-
     private QueryResultsWrapper executeQuery(QueryParam query) {
         R<QueryResults> response = milvusClient.query(query);
         if (response.getStatus() != R.Status.Success.getCode()) {
@@ -385,7 +445,7 @@ public class DocumentService {
      * 支持按文件名关键词与文件类型过滤。
      */
     public List<DocumentMetadata> listDocuments(String keyword, String fileType) {
-        List<Map<String, Object>> rows = metadataRows(scanRows("metadata[\"doc_md5\"] != \"\"", List.of("metadata")), false);
+        var rows = visibleMetadataRows("metadata[\"doc_md5\"] != \"\"", false);
         Map<String, DocumentMetadata> byDoc = new HashMap<>();
         for (Map<String, Object> row : rows) {
             String md5 = str(row.get("doc_md5"));
@@ -410,16 +470,13 @@ public class DocumentService {
      * 文档详情：按 doc_md5 聚合得到元数据；找不到返回 null。
      */
     public DocumentMetadata getDocument(String documentId) {
-        var firstChunk = QueryParam.newBuilder().withDatabaseName(databaseName).withCollectionName(collectionName)
-                .withConsistencyLevel(ConsistencyLevelEnum.STRONG)
-                .withExpr(documentFilter(documentId)).addOutField("metadata").withLimit(1L).build();
-        List<Map<String, Object>> rows = metadataRows(executeQuery(firstChunk).getRowRecords(), false);
+        var rows = visibleMetadataRows(documentFilter(documentId), false);
         if (rows.isEmpty()) {
             return null;
         }
         Map<String, Object> first = rows.get(0);
         String fileName = str(first.get("file_name"));
-        int count = countChunks(documentId);
+        int count = rows.size();
         return new DocumentMetadata(
                 documentId,
                 fileName,
@@ -438,7 +495,7 @@ public class DocumentService {
      * 支持按 section 关键词过滤。
      */
     public List<Map<String, Object>> listChunks(String documentId, String sectionKeyword) {
-        List<Map<String, Object>> rows = metadataRows(scanRows(documentFilter(documentId), List.of("metadata", "content")), true);
+        var rows = visibleMetadataRows(documentFilter(documentId), true);
         List<Map<String, Object>> result = new ArrayList<>();
         for (Map<String, Object> row : rows) {
             if (sectionKeyword != null && !sectionKeyword.isBlank()) {
@@ -485,6 +542,7 @@ public class DocumentService {
         // 同步删除 PostgreSQL 切片
         try {
             chunkRepository.deleteByDocMd5(documentId);
+            if (ocrPublication != null) ocrPublication.unpublishGeneration(documentId);
         } catch (Exception e) {
             log.error("删除 PG 切片失败 documentId={}", documentId, e);
         }
@@ -508,6 +566,12 @@ public class DocumentService {
         } catch (IOException e) {
             throw new IllegalStateException("读取原始文档失败: " + documentId, e);
         }
+    }
+
+    private List<Map<String, Object>> visibleMetadataRows(String filter, boolean includeContent) {
+        var fields = includeContent ? List.of("metadata", "content") : List.of("metadata");
+        var rows = metadataRows(scanRows(filter, fields), includeContent);
+        return ocrPublication == null ? rows : ocrPublication.visible(rows, row -> row);
     }
 
     private List<Map<String, Object>> metadataRows(List<QueryResultsWrapper.RowRecord> records, boolean includeContent) {
@@ -601,9 +665,25 @@ public class DocumentService {
         }
     }
 
-    public StoredDocument loadSource(String documentId) {
+    public void stageOcrOriginal(String documentId) {
+        if (ocrPublication == null) return;
         try {
-            return documentStorage.load(documentId).orElseThrow(() -> new IllegalStateException("原始文档不存在"));
+            ocrPublication.stageOriginal(documentId, documentStorage.isAvailable(documentId));
+        } catch (IOException e) {
+            throw new IllegalStateException("无法检查已有原件状态", e);
+        }
+    }
+
+    public StoredDocument loadSource(String documentId) {
+        if (ocrPublication != null && !ocrPublication.originalPublished(documentId)) {
+            throw new IllegalStateException("原始文档尚未导入");
+        }
+        try {
+            var source = documentStorage.load(documentId).orElseThrow(() -> new IllegalStateException("原始文档不存在"));
+            if (!DigestUtils.md5DigestAsHex(source.content()).equals(documentId)) {
+                throw new IllegalStateException("原始文档校验失败");
+            }
+            return source;
         } catch (IOException e) {
             throw new IllegalStateException("读取原始文档失败", e);
         }

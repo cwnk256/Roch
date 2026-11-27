@@ -216,12 +216,13 @@ public class LlmSectionGenerator implements SectionGenerator {
             String text = stringValue(claim.get("text"));
             Integer question = positiveInteger(claim.get("question"));
             boolean validQuestion = question != null && (attempt == null || questions.containsKey(question));
+            String asked = attempt != null && validQuestion ? questions.get(question) : "";
             List<ClaimVerifier.Citation> citations = attempt == null ? readCitations(claim.get("citations"))
                     : readAnchors(claim.get("evidenceIds"), attempt, validQuestion ? question : null);
             JsonNode tableFact = claim.get("tableFact");
             if (attempt != null && tableFact != null && !tableFact.isNull()) {
                 String proven = resolveTableFact(positiveInteger(tableFact), citations);
-                if (proven != null && StructuredEvidence.answersTableQuestion(questions.get(question), proven)) {
+                if (proven != null && answersTableQuestion(citations.getFirst(), asked, proven)) {
                     text = proven;
                 } else {
                     citations = Collections.singletonList(null);
@@ -229,12 +230,16 @@ public class LlmSectionGenerator implements SectionGenerator {
                 }
             } else if (attempt != null && citations.size() == 1 && citations.getFirst() != null
                     && citations.getFirst().physicalFacts() != null && text != null) {
-                String canonical = StructuredEvidence.canonicalTableAnswer(text, citations.getFirst().physicalFacts());
+                var citation = citations.getFirst();
+                String canonical = citation.ocrTable() == null
+                        ? StructuredEvidence.canonicalTableAnswer(text, citation.physicalFacts())
+                        : citation.ocrTable().canonicalAnswer(text);
                 if (canonical != null) text = canonical;
             }
             if (text == null || text.isBlank()) continue;
-            if (attempt != null && citations.stream().anyMatch(citation -> citation != null && citation.physicalFacts() != null)
-                    && !StructuredEvidence.answersTableQuestion(questions.get(question), text)) {
+            String answerText = text;
+            if (attempt != null && citations.stream().anyMatch(citation -> citation != null && citation.physicalFacts() != null
+                    && !answersTableQuestion(citation, asked, answerText))) {
                 citations = Collections.singletonList(null);
             }
             ordered.add(new OrderedClaim(validQuestion ? question : Integer.MAX_VALUE, new DraftClaim(text, citations)));
@@ -248,6 +253,11 @@ public class LlmSectionGenerator implements SectionGenerator {
         }
         List<DraftClaim> result = attempt == null ? inQuestionOrder(ordered) : completeQuestions(ordered, questions);
         return new SectionDraft(result, stringValue(draft.get("unattributedText")));
+    }
+
+    private static boolean answersTableQuestion(ClaimVerifier.Citation citation, String question, String answer) {
+        return citation.ocrTable() == null ? StructuredEvidence.answersTableQuestion(question, answer)
+                : citation.ocrTable().answersQuestion(question);
     }
 
     private static List<DraftClaim> completeQuestions(List<OrderedClaim> ordered, Map<Integer, String> questions) {
