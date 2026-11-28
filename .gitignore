@@ -92,5 +92,6 @@ desktop.ini
 /docs/
 /.vscode/
 
-
+!/测试资料/
+!/AGENTS.md
 
