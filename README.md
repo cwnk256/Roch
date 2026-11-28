@@ -402,6 +402,19 @@ PDF 切片现在会继承上页的章节层级。要修复旧 PDF 的跨页章�
 
 ## 测试与排查
 
+### PR 快速检查
+
+本地和 GitHub Actions 都从仓库根目录运行同一个入口。首次运行或更新前端锁文件后先安装依赖。
+
+```bash
+npm --prefix web ci
+node scripts/verify-fast.mjs
+```
+
+入口依次运行 Maven 单元测试、前端 `npm test` 和 `npm run build`。Maven 的 `fast-ci` profile 排除依赖数据库、Docker、真实模型或外部 API 的测试。新增集成测试使用 `*IntegrationTest` 类名，方便在完整套件中运行。每个 PR 都会运行 `Roch fast CI`。
+
+### 完整测试
+
 后端测试中既有纯单元测试，也有 PostgreSQL Testcontainers 和真实 Milvus 集成测试。先运行 Docker 与 Compose 依赖，并给普通 Spring Boot 测试指定隔离数据库及向量集合；测试不会替你创建这个常规数据库。
 
 例如先创建测试库，再在 Bash 中设置环境：
