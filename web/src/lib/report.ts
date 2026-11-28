@@ -1,4 +1,7 @@
 export type TaskType = 'SUMMARY' | 'REPORT' | 'COMPARE'
+export const taskTypeLabels: Record<TaskType, string> = {
+    SUMMARY: '总结', REPORT: '分析报告', COMPARE: '文档对比'
+}
 
 export interface ExportOptions {
     citationStyle: 'NUMBERED' | 'FILE_LOCATION'

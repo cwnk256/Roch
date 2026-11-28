@@ -119,22 +119,18 @@ async function retry() {
 }
 </script>
 <template>
-  <section class="page-intro">
-    <div><p class="eyebrow">INGESTION / SOURCE</p>
-      <h2>导入文档</h2>
-      <p>将本地资料加入知识库，导入后即可检索和用于报告生成。</p></div>
-  </section>
-  <div class="panel" style="padding:24px;max-width:760px">
-    <div class="file-drop">
-      <FileUp :size="30" aria-hidden="true"/>
+  <div class="page-intro"><p>将本地资料加入知识库，用于检索、问答和生成报告。</p></div>
+  <div class="panel panel-pad narrow-panel flow">
+    <div class="file-picker-area">
+      <span class="file-picker-icon"><FileUp :size="25" aria-hidden="true"/></span>
       <strong>{{ file?.name || '选择一个文档文件' }}</strong>
-      <span>支持 TXT、DOCX、PDF、XLSX、XLS</span><br>
+      <span class="muted">支持 TXT、DOCX、PDF、XLSX、XLS</span>
       <label class="button file-picker" :class="{disabled: fileControlsDisabled}">
         <input accept=".txt,.docx,.pdf,.xlsx,.xls" type="file" :disabled="fileControlsDisabled" @change="choose"/>
         选择文件
       </label>
     </div>
-    <div class="form-grid" style="margin-top:18px">
+    <div class="form-grid">
       <div class="field">
         <label for="import-file-kind">文件类型</label>
         <select id="import-file-kind" v-model="kind" :disabled="fileControlsDisabled">
@@ -144,8 +140,8 @@ async function retry() {
           <option value="excel">Excel</option>
         </select>
       </div>
-      <div style="display:flex;align-items:end">
-        <button :disabled="!file || loading || Boolean(jobId)" class="button primary" @click="upload">
+      <div class="form-action">
+        <button :disabled="!file || loading || Boolean(jobId)" class="button primary" type="button" @click="upload">
           <FileUp :size="15" aria-hidden="true"/>
           {{ loading ? '导入中…' : '开始导入' }}
         </button>
@@ -168,7 +164,7 @@ async function retry() {
     <div v-else-if="activeJob && !statusError" class="notice import-notice" role="status">正在查询 OCR 任务…</div>
     <div v-if="statusError" class="notice error import-notice" role="status">暂时无法更新 OCR 进度，将自动重试。{{ statusError }}</div>
     <div v-if="result" class="notice import-notice" role="status">
-      <CheckCircle2 :size="15" style="vertical-align:-3px" aria-hidden="true"/>
+      <CheckCircle2 :size="15" class="import-result-icon" aria-hidden="true"/>
       {{ result.message }}
       <span v-if="!result.duplicated"> 已建立 {{ result.chunkCount }} 个切片。</span>
     </div>
@@ -176,13 +172,16 @@ async function retry() {
 </template>
 
 <style scoped>
-.file-picker { margin-top: 18px; cursor: pointer }
-.file-picker:focus-within { outline: 2px solid #1c7457; outline-offset: 2px }
+.file-picker-area { display: grid; justify-items: center; text-align: center; gap: var(--space-2); background: var(--inset); border: 1px dashed var(--control-line); padding: var(--space-5); border-radius: var(--radius-control) }
+.file-picker-area strong { max-width: 100%; overflow-wrap: anywhere }
+.file-picker-area .muted { font-size: var(--font-small) }
+.file-picker-icon { display: grid; place-items: center; width: 48px; height: 48px; border-radius: 14px; background: var(--selection); color: var(--accent) }
+.file-picker { margin-top: var(--space-2); cursor: pointer }
+.file-picker:focus-within { outline: 2px solid var(--accent); outline-offset: 2px }
 .file-picker.disabled { cursor: not-allowed; opacity: .55 }
 .file-picker input { display: block; position: absolute; width: 1px; height: 1px; clip-path: inset(50%); overflow: hidden }
-.file-drop strong { overflow-wrap: anywhere }
-.import-hint { color: #668077; font-size: 12px; margin: 10px 0 0 }
-.import-notice { margin-top: 16px }
+.import-hint { color: var(--secondary); font-size: var(--font-small); margin: 0 }
+.import-result-icon { vertical-align: -3px; color: var(--success) }
 span.import-detail { margin-left: 8px }
 p.import-detail { margin: 5px 0 0 }
 .retry-button { margin-top: 10px }
