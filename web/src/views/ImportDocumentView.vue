@@ -12,8 +12,10 @@ const result = ref<DocumentImportResult | null>(null)
 const job = ref<PdfImportJob | null>(null)
 const jobId = ref('')
 const statusError = ref('')
+const dragDepth = ref(0)
 const storageKey = 'roch.pdfImportJobId'
-const uploadKinds: Record<string, string> = {txt: '', docx: 'word', pdf: 'pdf', xlsx: 'excel', xls: 'excel'}
+const uploadKinds = new Map([['txt', ''], ['docx', 'word'], ['pdf', 'pdf'], ['xlsx', 'excel'], ['xls', 'excel']])
+const acceptedExtensions = Array.from(uploadKinds.keys(), extension => `.${extension}`).join(',')
 const jobLabels: Record<PdfImportJob['status'], string> = {
   QUEUED: '等待 OCR 识别',
   RUNNING: '正在识别扫描页',
@@ -23,6 +25,7 @@ const jobLabels: Record<PdfImportJob['status'], string> = {
 }
 const activeJob = computed(() => Boolean(jobId.value) && job.value?.status !== 'SUCCEEDED' && job.value?.status !== 'FAILED')
 const fileControlsDisabled = computed(() => loading.value || (activeJob.value && !statusError.value))
+const isDropActive = computed(() => dragDepth.value > 0 && !fileControlsDisabled.value)
 
 onMounted(() => {
   try {
@@ -66,18 +69,65 @@ watch([jobId, activeJob], ([id, active], _, onCleanup) => {
   void poll()
 })
 
-function choose(event: Event) {
-  const input = event.target as HTMLInputElement
-  const selectedFile = input.files?.[0]
-  if (!selectedFile) return
+function detectUploadKind(selectedFile: File) {
+  const extension = selectedFile.name.match(/\.([^.]+)$/)?.[1].toLowerCase()
+  return extension ? uploadKinds.get(extension) : undefined
+}
+
+function selectFile(selectedFile: File, selectedKind = detectUploadKind(selectedFile)) {
+  if (fileControlsDisabled.value) return
   file.value = selectedFile
-  kind.value = uploadKinds[selectedFile.name.split('.').pop()?.toLowerCase() || ''] ?? kind.value
-  input.value = ''
+  kind.value = selectedKind ?? kind.value
   error.value = ''
   result.value = null
   job.value = null
   jobId.value = ''
   statusError.value = ''
+}
+
+function choose(event: Event) {
+  const input = event.currentTarget as HTMLInputElement
+  const selectedFile = input.files?.[0]
+  input.value = ''
+  if (selectedFile) selectFile(selectedFile)
+}
+
+function enterDropArea(event: DragEvent) {
+  if (!event.dataTransfer?.types.includes('Files')) return
+  event.preventDefault()
+  if (!fileControlsDisabled.value) dragDepth.value++
+}
+
+function allowFileDrop(event: DragEvent) {
+  const transfer = event.dataTransfer
+  if (!transfer?.types.includes('Files')) return
+  event.preventDefault()
+  transfer.dropEffect = fileControlsDisabled.value ? 'none' : 'copy'
+}
+
+function leaveDropArea() {
+  dragDepth.value = Math.max(0, dragDepth.value - 1)
+}
+
+function dropFile(event: DragEvent) {
+  const transfer = event.dataTransfer
+  dragDepth.value = 0
+  if (!transfer?.types.includes('Files')) return
+  event.preventDefault()
+  if (fileControlsDisabled.value) return
+
+  if (transfer.files.length > 1) {
+    error.value = '一次只能选择一个文件。'
+    return
+  }
+  const droppedFile = transfer.files.item(0)
+  const droppedItem = Array.from(transfer.items).find(item => item.kind === 'file')
+  const selectedKind = droppedFile ? detectUploadKind(droppedFile) : undefined
+  if (!droppedFile || selectedKind === undefined || droppedItem?.webkitGetAsEntry?.()?.isDirectory) {
+    error.value = '请选择 TXT、DOCX、PDF、XLSX 或 XLS 文件。'
+    return
+  }
+  selectFile(droppedFile, selectedKind)
 }
 
 async function upload() {
@@ -119,14 +169,15 @@ async function retry() {
 }
 </script>
 <template>
-  <div class="page-intro"><p>将本地资料加入知识库，用于检索、问答和生成报告。</p></div>
-  <div class="panel panel-pad narrow-panel flow">
-    <div class="file-picker-area">
+  <div class="page-intro narrow-panel import-intro"><p>将本地资料加入知识库，用于检索、问答和生成报告。</p></div>
+  <div class="panel panel-pad narrow-panel flow import-panel">
+    <div class="file-picker-area" :class="{'is-dragging': isDropActive}"
+         @dragenter="enterDropArea" @dragover="allowFileDrop" @dragleave="leaveDropArea" @drop="dropFile">
       <span class="file-picker-icon"><FileUp :size="25" aria-hidden="true"/></span>
-      <strong>{{ file?.name || '选择一个文档文件' }}</strong>
-      <span class="muted">支持 TXT、DOCX、PDF、XLSX、XLS</span>
+      <strong aria-live="polite">{{ file?.name || '将文档拖到此处' }}</strong>
+      <span class="muted">{{ isDropActive ? '松开即可选择文件' : '支持 TXT、DOCX、PDF、XLSX、XLS' }}</span>
       <label class="button file-picker" :class="{disabled: fileControlsDisabled}">
-        <input accept=".txt,.docx,.pdf,.xlsx,.xls" type="file" :disabled="fileControlsDisabled" @change="choose"/>
+        <input :accept="acceptedExtensions" type="file" :disabled="fileControlsDisabled" @change="choose"/>
         选择文件
       </label>
     </div>
@@ -172,7 +223,16 @@ async function retry() {
 </template>
 
 <style scoped>
+:global(.content:has(> .import-panel)) {
+  flex: 1;
+  display: grid;
+  grid-template-rows: 1fr auto 1fr;
+  padding-block: var(--space-5);
+}
+.import-intro, .import-panel { width: 100%; margin-inline: auto }
+.import-intro { align-self: end }
 .file-picker-area { display: grid; justify-items: center; text-align: center; gap: var(--space-2); background: var(--inset); border: 1px dashed var(--control-line); padding: var(--space-5); border-radius: var(--radius-control) }
+.file-picker-area.is-dragging { background: var(--selection); border-style: solid; border-color: var(--accent) }
 .file-picker-area strong { max-width: 100%; overflow-wrap: anywhere }
 .file-picker-area .muted { font-size: var(--font-small) }
 .file-picker-icon { display: grid; place-items: center; width: 48px; height: 48px; border-radius: 14px; background: var(--selection); color: var(--accent) }
