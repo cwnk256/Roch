@@ -169,8 +169,8 @@ async function retry() {
 }
 </script>
 <template>
-  <div class="page-intro"><p>将本地资料加入知识库，用于检索、问答和生成报告。</p></div>
-  <div class="panel panel-pad narrow-panel flow">
+  <div class="page-intro narrow-panel import-intro"><p>将本地资料加入知识库，用于检索、问答和生成报告。</p></div>
+  <div class="panel panel-pad narrow-panel flow import-panel">
     <div class="file-picker-area" :class="{'is-dragging': isDropActive}"
          @dragenter="enterDropArea" @dragover="allowFileDrop" @dragleave="leaveDropArea" @drop="dropFile">
       <span class="file-picker-icon"><FileUp :size="25" aria-hidden="true"/></span>
@@ -223,6 +223,14 @@ async function retry() {
 </template>
 
 <style scoped>
+:global(.content:has(> .import-panel)) {
+  flex: 1;
+  display: grid;
+  grid-template-rows: 1fr auto 1fr;
+  padding-block: var(--space-5);
+}
+.import-intro, .import-panel { width: 100%; margin-inline: auto }
+.import-intro { align-self: end }
 .file-picker-area { display: grid; justify-items: center; text-align: center; gap: var(--space-2); background: var(--inset); border: 1px dashed var(--control-line); padding: var(--space-5); border-radius: var(--radius-control) }
 .file-picker-area.is-dragging { background: var(--selection); border-style: solid; border-color: var(--accent) }
 .file-picker-area strong { max-width: 100%; overflow-wrap: anywhere }
