@@ -223,14 +223,7 @@ async function retry() {
 </template>
 
 <style scoped>
-:global(.content:has(> .import-panel)) {
-  flex: 1;
-  display: grid;
-  grid-template-rows: 1fr auto 1fr;
-  padding-block: var(--space-5);
-}
 .import-intro, .import-panel { width: 100%; margin-inline: auto }
-.import-intro { align-self: end }
 .file-picker-area { display: grid; justify-items: center; text-align: center; gap: var(--space-2); background: var(--inset); border: 1px dashed var(--control-line); padding: var(--space-5); border-radius: var(--radius-control) }
 .file-picker-area.is-dragging { background: var(--selection); border-style: solid; border-color: var(--accent) }
 .file-picker-area strong { max-width: 100%; overflow-wrap: anywhere }
