@@ -1,7 +1,9 @@
 <script lang="ts" setup>
 import {ref} from 'vue';
-import {Send, Sparkles} from 'lucide-vue-next';
+import {Sparkles} from 'lucide-vue-next';
+import {RouterLink} from 'vue-router';
 import {api} from '../api';
+import ChatComposer from '../components/ChatComposer.vue';
 
 const input = ref(''), reply = ref(''), loading = ref(false), error = ref('');
 
@@ -21,35 +23,32 @@ async function send() {
 }
 </script>
 <template>
-  <section class="page-intro">
-    <div><p class="eyebrow">CHAT / SINGLE TURN</p>
-      <h2>单轮问答</h2>
-      <p>一次提问，一次回答，适合快速搜确认知识点。</p></div>
-  </section>
+  <div class="page-intro"><p>向知识库提一个独立问题，快速核对文档中的事实。</p></div>
   <div class="chat-layout">
     <div class="panel chat-panel">
-      <div class="messages">
+      <div class="messages" tabindex="0" role="region" aria-label="问答结果">
         <div v-if="!reply&&!loading" class="empty-state">
-          <Sparkles :size="24"/>
+          <Sparkles :size="24" aria-hidden="true"/>
           <strong>准备好回答你的问题</strong><span>试试询问文档中的一个具体事实。</span></div>
-        <div v-if="reply" class="message assistant"><span class="message-label">ROCH</span>
+        <div v-if="reply" class="message assistant"><span class="message-label">Roch</span>
           <div class="message-bubble">{{ reply }}</div>
         </div>
-        <div v-if="loading" class="message assistant"><span class="message-label">ROCH · 思考中</span>
+        <div v-if="loading" class="message assistant" role="status"><span class="message-label">Roch</span>
           <div class="message-bubble">正在检索并生成回答…</div>
         </div>
       </div>
-      <div v-if="error" class="notice error">{{ error }}</div>
-      <form class="chat-compose" @submit.prevent="send"><textarea v-model="input" placeholder="输入你的问题…"
-                                                                  @keydown.enter.exact.prevent="send"></textarea>
-        <button class="button primary" title="发送" type="submit">
-          <Send :size="16"/>
-        </button>
-      </form>
+      <div v-if="error" class="notice error" role="alert">{{ error }}</div>
+      <ChatComposer v-model="input" :loading="loading" placeholder="输入你的问题…" @send="send"/>
     </div>
-    <div class="panel" style="padding:18px">
-      <div class="section-heading"><h3>使用提示</h3></div>
-      <p class="muted" style="font-size:13px;line-height:1.7">
-        单轮问答不会保留上下文，适合独立问题。需要连续追问时，请切换到多轮问答。</p></div>
+    <aside class="panel panel-pad chat-tips">
+      <div class="section-heading"><h2>需要继续追问？</h2></div>
+      <p class="muted">多轮问答会保留当前会话的上下文。</p>
+      <RouterLink to="/conversation">打开多轮问答</RouterLink>
+    </aside>
   </div>
 </template>
+
+<style scoped>
+.chat-tips p { font-size: var(--font-small); line-height: 1.65 }
+.chat-tips a { font-size: var(--font-small) }
+</style>

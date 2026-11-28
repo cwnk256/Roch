@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import {ref} from 'vue'
+import {ChevronRight} from 'lucide-vue-next'
 
 defineProps<{
   page: number
@@ -15,7 +16,7 @@ function openPreview(event: Event) {
 
 <template>
   <details class="ocr-preview" @toggle="openPreview">
-    <summary>查看第 {{ page }} 页定位</summary>
+    <summary><ChevronRight :size="14" class="disclosure-chevron" aria-hidden="true"/>查看第 {{ page }} 页定位</summary>
     <div v-if="opened" class="ocr-preview-content">
       <p v-if="status === 'error'" role="status">无法预览该页，请打开原 PDF 核对。</p>
       <template v-else>
@@ -34,13 +35,14 @@ function openPreview(event: Event) {
 
 <style scoped>
 .ocr-preview { margin: 10px 0 8px }
-.ocr-preview > summary { color: #1c7457; cursor: pointer; width: fit-content; font-size: 12px }
-.ocr-preview > summary:focus-visible { outline: 2px solid #1c7457; outline-offset: 3px }
+.ocr-preview > summary { display: flex; align-items: center; gap: var(--space-1); color: var(--accent); width: fit-content; font-size: var(--font-small) }
+.ocr-preview > summary::-webkit-details-marker { display: none }
+.ocr-preview > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px }
 .ocr-preview-content { margin-top: 8px; max-width: 720px }
-.ocr-preview-content p { margin: 0; color: #536c61; font-size: 12px }
+.ocr-preview-content p { margin: 0; color: var(--secondary); font-size: 12px }
 figure { margin: 0 }
-.ocr-page { position: relative; box-shadow: 0 0 0 1px #dfe9e3 }
+.ocr-page { position: relative; box-shadow: 0 0 0 1px var(--line) }
 img { display: block; width: 100%; height: auto }
-.ocr-highlight { position: absolute; pointer-events: none; background: rgb(255 193 69 / .24); outline: 2px solid #996b13; outline-offset: -1px }
-figcaption { margin-top: 5px; color: #536c61; font-size: 12px }
+.ocr-highlight { position: absolute; pointer-events: none; background: rgb(255 193 69 / .24); outline: 2px solid #8a570b; outline-offset: -1px }
+figcaption { margin-top: 5px; color: var(--secondary); font-size: 12px }
 </style>
