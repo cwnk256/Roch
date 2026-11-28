@@ -1,11 +1,12 @@
 <script lang="ts" setup>
-import {onMounted, ref} from 'vue'
+import {nextTick, onMounted, ref} from 'vue'
 import {Eye, RefreshCw, Search, Trash2} from 'lucide-vue-next'
 import {api} from '../api'
 import type {DocumentMeta} from '../types'
 import EmptyState from '../components/EmptyState.vue'
 import LoadingBlock from '../components/LoadingBlock.vue'
 import PaginationControl from '../components/PaginationControl.vue'
+import StatusBadge from '../components/StatusBadge.vue'
 
 const pageSize = 10
 const docs = ref<DocumentMeta[]>([])
@@ -16,6 +17,12 @@ const loading = ref(false)
 const error = ref('')
 const selected = ref<DocumentMeta | null>(null)
 const chunks = ref<Record<string, unknown>[]>([])
+const chunkPage = ref(0)
+const chunkTotal = ref(0)
+const chunkLoading = ref(false)
+const chunkError = ref('')
+const previewHeading = ref<HTMLHeadingElement | null>(null)
+let chunkRequest = 0
 
 async function load(nextPage = page.value) {
   loading.value = true
@@ -33,24 +40,55 @@ async function load(nextPage = page.value) {
 }
 
 function search() {
-  selected.value = null
-  chunks.value = []
+  resetPreview()
   load(0)
 }
 
-async function inspect(document: DocumentMeta) {
+function resetPreview(document: DocumentMeta | null = null) {
+  chunkRequest++
   selected.value = document
+  chunks.value = []
+  chunkPage.value = 0
+  chunkTotal.value = 0
+  chunkLoading.value = false
+  chunkError.value = ''
+}
+
+async function inspect(document: DocumentMeta) {
+  resetPreview(document)
+  void loadChunks(0)
+  if (window.matchMedia('(width < 1200px)').matches) {
+    await nextTick()
+    previewHeading.value?.focus()
+  }
+}
+
+async function loadChunks(nextPage: number): Promise<void> {
+  const documentId = selected.value?.documentId
+  if (!documentId) return
+  const request = ++chunkRequest
+  chunkLoading.value = true
+  chunkError.value = ''
   try {
-    chunks.value = (await api.chunks(document.documentId, {page: 0, size: 8})).content || []
+    const result = await api.chunks(documentId, {page: nextPage, size: pageSize})
+    if (request !== chunkRequest) return
+    const lastPage = Math.max(0, Math.ceil(result.total / pageSize) - 1)
+    if (nextPage > lastPage) return loadChunks(lastPage)
+    chunks.value = result.content || []
+    chunkPage.value = result.page
+    chunkTotal.value = result.total
   } catch (e) {
-    error.value = String(e)
+    if (request === chunkRequest) chunkError.value = String(e)
+  } finally {
+    if (request === chunkRequest) chunkLoading.value = false
   }
 }
 
 async function remove(document: DocumentMeta) {
-  if (!confirm(`Delete ${document.fileName}?`)) return
+  if (!confirm(`删除「${document.fileName}」？`)) return
   try {
     await api.deleteDocument(document.documentId)
+    if (selected.value?.documentId === document.documentId) resetPreview()
     await load(docs.value.length === 1 && page.value > 0 ? page.value - 1 : page.value)
   } catch (e) {
     error.value = String(e)
@@ -61,66 +99,101 @@ onMounted(load)
 </script>
 
 <template>
-  <section class="page-intro">
-    <div><p class="eyebrow">LIBRARY / DOCUMENTS</p>
-      <h2>文档管理</h2>
-      <p>浏览文档，切片和导入状态。</p></div>
-    <div class="actions">
-      <div class="field"><input v-model="keyword" placeholder="Search file name" @keyup.enter="search"/></div>
-      <button class="button primary" @click="search">
-        <Search :size="15"/>
-        搜索
+  <div class="page-intro">
+    <p>按文件名查找文档，查看导入状态和切片。</p>
+    <form class="actions library-search" @submit.prevent="search">
+      <div class="field">
+        <input id="document-filter" v-model="keyword" type="search" aria-label="文件名" placeholder="搜索文件名"/>
+      </div>
+      <button class="button primary" type="submit"><Search :size="15" aria-hidden="true"/>搜索</button>
+      <button class="icon-button" type="button" aria-label="刷新文档" title="刷新文档" @click="load()">
+        <RefreshCw :size="16" aria-hidden="true"/>
       </button>
-      <button class="button" @click="load()">
-        <RefreshCw :size="15"/>
-        刷新
-      </button>
-    </div>
-  </section>
-  <div v-if="error" class="notice error">{{ error }}</div>
+    </form>
+  </div>
+
+  <div v-if="error" class="notice error" role="alert">{{ error }}</div>
   <LoadingBlock v-if="loading"/>
-  <div v-else class="grid" style="grid-template-columns:minmax(0,1.4fr) minmax(260px,.6fr);align-items:start">
-    <div class="panel table-wrap">
-      <table v-if="docs.length" class="data-table">
-        <thead>
-        <tr>
-          <th>File</th>
-          <th>Type</th>
-          <th>Chunks</th>
-          <th>Status</th>
-          <th></th>
-        </tr>
-        </thead>
-        <tbody>
-        <tr v-for="document in docs" :key="document.documentId">
-          <td><strong>{{ document.fileName }}</strong><br/><small class="muted">{{ document.documentId }}</small></td>
-          <td>{{ document.fileType || '-' }}</td>
-          <td>{{ document.chunkCount || 0 }}</td>
-          <td>{{ document.status || 'READY' }}</td>
-          <td>
-            <button class="icon-button" title="View chunks" @click="inspect(document)">
-              <Eye :size="16"/>
-            </button>
-            <button class="icon-button" title="Delete document" @click="remove(document)">
-              <Trash2 :size="16"/>
-            </button>
-          </td>
-        </tr>
-        </tbody>
-      </table>
-      <EmptyState v-else message="Import a document first" title="No documents"/>
+  <div v-else class="library-columns">
+    <section class="panel document-list" aria-label="文档列表">
+      <div v-if="docs.length" class="table-wrap" tabindex="0" role="region" aria-label="文档表格">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th scope="col">文档</th><th scope="col">类型</th><th scope="col">切片</th>
+              <th scope="col">状态</th><th scope="col">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="document in docs" :key="document.documentId" :class="{'is-selected': selected?.documentId === document.documentId}">
+              <td><strong>{{ document.fileName }}</strong><small class="muted">{{ document.documentId }}</small></td>
+              <td>{{ document.fileType || '—' }}</td>
+              <td>{{ document.chunkCount || 0 }}</td>
+              <td><StatusBadge :value="document.status || 'READY'"/></td>
+              <td>
+                <div class="document-actions">
+                  <button class="icon-button" type="button" :aria-label="'查看切片：' + document.fileName"
+                          title="查看切片" aria-controls="document-chunk-preview"
+                          :aria-current="selected?.documentId === document.documentId ? 'true' : undefined" @click="inspect(document)">
+                    <Eye :size="16" aria-hidden="true"/>
+                  </button>
+                  <button class="icon-button danger" type="button" :aria-label="'删除文档：' + document.fileName"
+                          title="删除文档" @click="remove(document)">
+                    <Trash2 :size="16" aria-hidden="true"/>
+                  </button>
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <EmptyState v-else title="未找到文档" message="可以调整搜索条件，或先导入文档。"/>
       <PaginationControl :page="page" :size="pageSize" :total="total" @change="load"/>
-    </div>
-    <div class="panel" style="padding:18px">
-      <template v-if="selected"><h3 style="margin-top:0">{{ selected.fileName }}</h3>
-        <p class="muted" style="font-size:12px">{{ selected.documentId }}</p>
-        <div class="section-heading"><h3>Chunk preview</h3><span>{{ chunks.length }} items</span></div>
-        <div class="result-list">
-          <div v-for="(chunk, index) in chunks" :key="index" class="result-item"><p>
-            {{ chunk.content || chunk.text || JSON.stringify(chunk) }}</p></div>
+    </section>
+
+    <section id="document-chunk-preview" class="panel document-preview" aria-label="切片预览">
+      <template v-if="selected">
+        <header class="preview-heading">
+          <h2 ref="previewHeading" tabindex="-1">切片预览</h2>
+          <p>{{ selected.fileName }}</p>
+        </header>
+        <LoadingBlock v-if="chunkLoading"/>
+        <div v-else-if="chunkError" class="notice error" role="alert">{{ chunkError }}</div>
+        <div v-else-if="chunks.length" class="preview-scroll" tabindex="0" role="region" aria-label="切片内容">
+          <div v-for="(chunk, index) in chunks" :key="index" class="result-item">
+            <p>{{ chunk.content || chunk.text || JSON.stringify(chunk) }}</p>
+          </div>
         </div>
+        <EmptyState v-else title="此文档还没有切片"/>
+        <PaginationControl :page="chunkPage" :size="pageSize" :total="chunkTotal" @change="loadChunks"/>
       </template>
-      <EmptyState v-else message="Chunk content appears here" title="Select a document"/>
-    </div>
+      <EmptyState v-else title="选择文档查看切片" message="选中文档旁的查看按钮，核对切片原文。"/>
+    </section>
   </div>
 </template>
+
+<style scoped>
+.library-search { flex-wrap: nowrap; max-width: 100% }
+.library-search .button { min-height: 40px; white-space: nowrap }
+.library-columns { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-4); align-items: start }
+.document-list { overflow: hidden }
+.document-list .data-table small { display: block; margin-top: var(--space-1) }
+.document-list .data-table td:nth-child(n + 2) { white-space: nowrap }
+.document-actions { display: flex; align-items: center }
+.document-preview { display: flex; flex-direction: column; overflow: hidden }
+.preview-heading { padding: var(--space-4); border-bottom: 1px solid var(--line) }
+.preview-heading h2 { margin: 0 0 var(--space-2); font-size: var(--font-heading) }
+.preview-heading p { margin: 0; color: var(--secondary); font-size: var(--font-small) }
+.preview-scroll { min-height: 0; overflow-y: auto; overscroll-behavior: contain }
+.preview-scroll:focus-visible, .table-wrap:focus-visible { outline-offset: -3px }
+.preview-scroll .result-item + .result-item { border-top: 1px solid var(--line) }
+.preview-scroll .result-item p { margin: 0; color: var(--text); white-space: pre-wrap }
+.document-preview .notice { margin: var(--space-4) }
+@media (min-width: 1200px) {
+  .library-columns { grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr) }
+  .document-preview {
+    max-height: clamp(300px, calc(100dvh - var(--toolbar-height) - var(--space-6) - 40px - 2 * var(--space-5)), 975.33px);
+  }
+  .preview-heading, .document-preview .pagination { flex: none }
+}
+</style>

@@ -1,4 +1,7 @@
 export type TaskType = 'SUMMARY' | 'REPORT' | 'COMPARE'
+export const taskTypeLabels: Record<TaskType, string> = {
+    SUMMARY: '总结', REPORT: '分析报告', COMPARE: '文档对比'
+}
 
 export interface ExportOptions {
     citationStyle: 'NUMBERED' | 'FILE_LOCATION'
@@ -25,6 +28,12 @@ export interface ReportTemplate {
     sections: TemplateSection[]
 }
 
+export interface OcrEvidence {
+    region?: number[] | null
+    table?: {row: number; column: number} | null
+    reviewRequired: boolean
+}
+
 export interface Evidence {
     documentId: string
     fileName: string
@@ -37,6 +46,8 @@ export interface Evidence {
     attemptedQuote?: string
     sourceStatus?: string
     chunkIndex?: number
+    nativeLocation?: string
+    ocr?: OcrEvidence | null
 }
 
 export interface Claim {
@@ -104,14 +115,32 @@ export function locationOf(source: Evidence) {
         parts.push(`第 ${pages} 页`)
     }
     if (source.section?.trim()) parts.push(source.section)
+    const nativeLocation = source.nativeLocation?.trim()
+    if (nativeLocation && nativeLocation !== source.section?.trim()) parts.push(nativeLocation)
     if (!parts.length && source.chunkIndex != null) parts.push(`切片 ${source.chunkIndex + 1}`)
     return parts.join(' · ') || '位置未记录'
 }
 
 export function originalFileUrl(source: Evidence) {
-    const page = source.pageStart && source.pageStart > 0 && /\.pdf$/i.test(source.fileName)
+    const page = source.pageStart && source.pageStart > 0 && (source.ocr || /\.pdf$/i.test(source.fileName))
         ? `#page=${source.pageStart}` : ''
     return `/api/documents/${encodeURIComponent(source.documentId)}/file${page}`
+}
+
+export function ocrPagePreview(source: Evidence) {
+    const page = source.pageStart
+    const region = source.ocr?.region
+    if (!page || !Number.isInteger(page) || page < 1 || !region || region.length !== 4) return
+    if (!region.every(value => Number.isFinite(value) && value >= 0 && value <= 1)) return
+    const [left, top, right, bottom] = region
+    if (left >= right || top >= bottom) return
+    return {
+        url: `/api/documents/${encodeURIComponent(source.documentId)}/pdf-pages/${page}`,
+        highlight: {
+            left: `${left * 100}%`, top: `${top * 100}%`,
+            width: `${(right - left) * 100}%`, height: `${(bottom - top) * 100}%`
+        }
+    }
 }
 
 export function factFields(fact: ComparisonFact) {

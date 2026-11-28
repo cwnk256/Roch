@@ -183,4 +183,29 @@
         </plugins>
     </build>
 
+    <profiles>
+        <profile>
+            <id>fast-ci</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <configuration>
+                            <failIfNoTests>true</failIfNoTests>
+                            <excludes>
+                                <exclude>**/*$*</exclude>
+                                <!-- Docker, real databases, and external model or API tests use the full suite. -->
+                                <exclude>**/*IntegrationTest.java</exclude>
+                                <exclude>**/RagApplicationTests.java</exclude>
+                                <exclude>**/RestTests.java</exclude>
+                                <exclude>**/TraceabilityModelAcceptanceTest.java</exclude>
+                            </excludes>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
+
 </project>

@@ -5,6 +5,8 @@ defineProps<{ title: string; message?: string }>()
 </script>
 <template>
   <div class="empty-state">
-    <Inbox :size="24"/>
-    <strong>{{ title }}</strong><span>{{ message || '暂无数据' }}</span></div>
+    <Inbox :size="24" aria-hidden="true"/>
+    <strong>{{ title }}</strong>
+    <span v-if="message">{{ message }}</span>
+  </div>
 </template>

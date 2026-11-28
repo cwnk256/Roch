@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import {computed, ref, watch, useId} from 'vue'
+import {computed, nextTick, ref, watch, useId} from 'vue'
 import PaginationControl from './PaginationControl.vue'
 import {paginateItems} from '../lib/pagination'
 import {ChevronRight} from 'lucide-vue-next'
@@ -52,6 +52,16 @@ const visibleSections = computed(() => selectedSection.value ? [{
   claims: paginateItems(selectedSection.value.claims || [], pageSize, itemPage.value),
   conclusions: paginateItems(selectedSection.value.conclusions || [], pageSize, itemPage.value)
 }] : [])
+
+async function changePage(page: number) {
+  itemPage.value = page
+  await nextTick()
+  if (scrollArea.value && getComputedStyle(scrollArea.value).overflowY === 'visible') {
+    scrollArea.value.focus({preventScroll: true})
+    scrollArea.value.scrollIntoView({block: 'start'})
+  }
+}
+
 watch(() => props.report, () => { sectionIndex.value = initialSection(); itemPage.value = 0; dimensionIndex.value = 0 })
 watch(sectionIndex, () => { itemPage.value = 0; dimensionIndex.value = 0 })
 watch([sectionIndex, itemPage, dimensionIndex], () => { if (scrollArea.value) scrollArea.value.scrollTop = 0 }, {flush: 'post'})
@@ -71,7 +81,7 @@ watch([sectionIndex, itemPage, dimensionIndex], () => { if (scrollArea.value) sc
         <select :id="dimensionSelectId" v-model="dimensionIndex"><option v-for="(row,index) in report.comparison.rows" :key="index" :value="index">{{ row.dimension }}</option></select>
       </div>
     </div>
-    <div ref="scrollArea" class="reader-scroll" :key="sectionIndex">
+    <div ref="scrollArea" class="reader-scroll" tabindex="0" role="region" aria-label="报告正文" :key="sectionIndex">
     <p v-if="report.schemaVersion !== 'v2'" class="notice">历史报告，仅有章节来源。</p>
     <p v-if="report.configuration?.title" class="report-meta">
       {{ report.configuration.title }} · 模板版本 {{ report.configuration.templateVersion }}
@@ -108,7 +118,7 @@ watch([sectionIndex, itemPage, dimensionIndex], () => { if (scrollArea.value) sc
       <template v-else-if="report.comparison && section.id">
         <p v-if="!section.conclusions?.length" class="notice">本次未找到可列入本节的比较结论。</p>
         <details v-for="(item, position) in section.conclusions" :key="position" class="conclusion">
-          <summary><ChevronRight :size="15" class="conclusion-chevron" aria-hidden="true"/><span class="conclusion-text">{{ item.text }}</span><span class="cell-status" :data-status="item.kind">{{ statusLabel(item.kind) }}</span></summary>
+          <summary><ChevronRight :size="15" class="conclusion-chevron disclosure-chevron" aria-hidden="true"/><span class="conclusion-text">{{ item.text }}</span><span class="cell-status" :data-status="item.kind">{{ statusLabel(item.kind) }}</span></summary>
           <div class="conclusion-sources">
           <ClaimEvidence v-for="id in item.claimIds" :key="id" :claim="claims.get(id)" :sources="sources"/>
           </div>
@@ -125,47 +135,50 @@ watch([sectionIndex, itemPage, dimensionIndex], () => { if (scrollArea.value) sc
       </template>
     </section>
     </div>
-    <PaginationControl :page="itemPage" :size="pageSize" :total="itemTotal" @change="itemPage=$event"/>
+    <PaginationControl :page="itemPage" :size="pageSize" :total="itemTotal" @change="changePage"/>
   </article>
 </template>
 
 <style scoped>
-.report { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow-wrap: anywhere; font-size: 13px; line-height: 1.8; color: #3d554d }
-.reader-controls { display: flex; gap: 14px; padding: 14px 0; flex: none; border-bottom: 1px solid #edf2ef }
+.report { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow-wrap: anywhere; font-size: var(--font-body); line-height: 1.75; color: var(--text) }
+.reader-controls { display: flex; gap: 14px; padding: 14px 0; flex: none; border-bottom: 1px solid var(--inset) }
 .reader-controls .field { flex: 1; min-width: 0 }
 .reader-controls select { width: 100%; min-width: 0 }
-.reader-scroll { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; padding: 14px 2px }
+.reader-scroll { flex: 1; min-height: 0; padding: var(--space-4) 2px }
+.reader-scroll:focus-visible { outline-offset: -2px }
+@media (min-width: 901px) and (min-height: 650px) {
+  .reader-scroll { overflow: auto; overscroll-behavior: contain; scrollbar-width: thin }
+}
 .report > .pagination { flex: none }
 @media (max-width: 600px) { .reader-controls { gap: 8px; padding: 10px 0 } .reader-controls select { padding: 8px; font-size: 12px } }
-.report-meta { color: #82958d; font-size: 11px; margin: 0 0 10px }
-.report-summary { background: #f7fbf8; border: 1px solid #e2ebe6; border-radius: 8px; padding: 18px }
-h3 { color: #26473b; font-size: 15px; margin: 0 0 14px }
+.report-meta { color: var(--secondary); font-size: 11px; margin: 0 0 10px }
+.report-summary { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-control); padding: var(--space-5) }
+h3 { color: var(--text); font-size: 15px; margin: 0 0 14px }
 .report-section { margin-top: 0; min-width: 0 }
-.body { white-space: pre-wrap; margin: 0 0 12px }
-.matrix { overflow-x: auto; border: 1px solid #dfe9e3; border-radius: 8px }
-.matrix:focus-visible { outline: 2px solid #6cb891; outline-offset: 2px }
+.body { max-width: 70ch; white-space: pre-wrap; margin: 0 0 var(--space-3) }
+.matrix { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px }
+.matrix:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px }
 table { border-collapse: collapse; width: 100%; table-layout: fixed; min-width: 660px }
-th, td { padding: 16px; text-align: left; vertical-align: top; border-right: 1px solid #edf2ef; border-bottom: 1px solid #edf2ef }
-th { font-size: 12px; color: #668077; font-weight: 600; background: #fbfdfc }
+th, td { padding: 16px; text-align: left; vertical-align: top; border-right: 1px solid var(--inset); border-bottom: 1px solid var(--inset) }
+th { font-size: 12px; color: var(--secondary); font-weight: 600; background: var(--inset) }
 th:first-child { width: 120px }
-th[scope="row"] { color: #365e4e; background: #f7fbf8 }
+th[scope="row"] { color: var(--text); background: var(--inset) }
 tr:last-child td, tr:last-child th { border-bottom: 0 }
 tr > :last-child { border-right: 0 }
-.cell-status { display: inline-block; font-size: 11px; line-height: 1.6; padding: 3px 8px; border-radius: 20px; background: #edf2ef; color: #5e756b }
-.cell-status[data-status="FOUND"], .cell-status[data-status="COMMON"] { background: #e3f6eb; color: #287650 }
-.cell-status[data-status="UNVERIFIED"], .cell-status[data-status="INCOMPARABLE"] { background: #fff4dc; color: #996b13 }
-.cell-status[data-status="RETRIEVAL_FAILED"], .cell-status[data-status="EXTRACTION_FAILED"], .cell-status[data-status="POSSIBLE_CONFLICT"] { background: #fde8e8; color: #ad4747 }
-.cell-reason { color: #82958d; font-size: 12px }
-.fact { margin-top: 14px; padding-top: 12px; border-top: 1px solid #edf2ef }
+.cell-status { display: inline-block; font-size: 11px; line-height: 1.6; padding: 3px 8px; border-radius: 20px; background: var(--inset); color: var(--secondary) }
+.cell-status[data-status="FOUND"], .cell-status[data-status="COMMON"] { background: var(--success-surface); color: var(--success) }
+.cell-status[data-status="UNVERIFIED"], .cell-status[data-status="INCOMPARABLE"] { background: var(--warning-surface); color: var(--warning) }
+.cell-status[data-status="RETRIEVAL_FAILED"], .cell-status[data-status="EXTRACTION_FAILED"], .cell-status[data-status="POSSIBLE_CONFLICT"] { background: var(--danger-surface); color: var(--danger) }
+.cell-reason { color: var(--secondary); font-size: 12px }
+.fact { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--inset) }
 .fact p { margin: 5px 0; font-size: 12px }
-.warning { color: #996b13; font-weight: 500; font-size: 11px }
-.conclusion { margin: 8px 0; border: 1px solid #dfe9e3; border-radius: 8px }
+.warning { color: var(--warning); font-weight: 500; font-size: 11px }
+.conclusion { margin: 8px 0; border: 1px solid var(--line); border-radius: 8px }
 .conclusion > summary { display: flex; align-items: flex-start; gap: 10px; padding: 14px; cursor: pointer; list-style: none }
 .conclusion > summary::-webkit-details-marker { display: none }
-.conclusion > summary:hover { background: #f7fbf8; border-radius: 8px }
-.conclusion > summary:focus-visible { outline: 2px solid #1c7457; outline-offset: -2px; border-radius: 8px }
-.conclusion-chevron { flex: none; margin-top: 5px; color: #82958d }
-[open] > summary .conclusion-chevron { transform: rotate(90deg) }
+.conclusion > summary:hover { background: var(--inset); border-radius: 8px }
+.conclusion > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 8px }
+.conclusion-chevron { flex: none; margin-top: 5px; color: var(--secondary) }
 .conclusion-text { flex: 1; min-width: 0 }
 .conclusion > summary .cell-status { flex: none }
 .conclusion-sources { padding: 0 14px 8px 39px }

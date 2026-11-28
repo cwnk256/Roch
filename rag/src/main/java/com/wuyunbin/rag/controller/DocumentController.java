@@ -5,19 +5,27 @@ import com.wuyunbin.rag.retrieval.KeywordRetriever;
 import com.wuyunbin.rag.service.DocumentAggregationService;
 import com.wuyunbin.rag.service.DocumentSearchService;
 import com.wuyunbin.rag.service.DocumentService;
+import com.wuyunbin.rag.service.ocr.OcrImportJob;
+import com.wuyunbin.rag.service.ocr.OcrImportService;
+import com.wuyunbin.rag.service.ocr.OcrPdfPages;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.MediaType;
 import org.springframework.http.ContentDisposition;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
-import java.util.List;
-import java.util.Map;
+import java.io.IOException;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.UUID;
 
 /**
  * 文档管理接口：导入（TXT/Word/PDF/Excel）+ Phase 1 文档检索（列表/详情/切片/搜索/删除/重新索引）。
@@ -32,6 +40,8 @@ public class DocumentController {
     private final DocumentSearchService documentSearchService;
     private final KeywordRetriever keywordRetriever;
     private final DocumentAggregationService aggregationService;
+    private final OcrImportService ocrImports;
+    private final OcrPdfPages ocrPdfPages;
 
     // ============ 导入接口 ============
 
@@ -58,13 +68,51 @@ public class DocumentController {
 
     @PostMapping(value = "/pdf", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     @Operation(summary = "导入 PDF 文档",
-            description = "上传 .pdf 文件，按字号统计检测标题转为 ATX Markdown 后语义切片写入 Milvus；标题自动映射为 # ~ ### 以复用 heading-aware 切片")
-    public ResponseEntity<?> importPdf(@RequestParam("file") MultipartFile file) {
+            description = "可提取正文的 PDF 同步导入；指定 ocr=auto 时，需要 OCR 的 PDF 返回异步任务")
+    public ResponseEntity<?> importPdf(@RequestParam("file") MultipartFile file,
+                                       @RequestParam(value = "ocr", required = false) String ocr) {
         try {
+            if (ocr != null) {
+                if (!"auto".equals(ocr)) {
+                    throw new IllegalArgumentException("OCR 导入参数仅支持 auto");
+                }
+                var job = ocrImports.startIfRequired(file);
+                if (job.isPresent()) {
+                    return acceptedPdfImport(job.get());
+                }
+            }
             return ResponseEntity.ok(documentService.importPdf(file));
         } catch (IllegalArgumentException | IllegalStateException e) {
+            String message = ocr == null ? ocrImports.legacyError(file, e) : e.getMessage();
+            return ResponseEntity.badRequest().body(Map.of("error", message == null ? "PDF 导入失败" : message));
+        }
+    }
+
+    @GetMapping("/pdf-imports/{jobId}")
+    @Operation(summary = "查询 PDF OCR 导入任务")
+    public ResponseEntity<OcrImportJob> getPdfImport(@PathVariable UUID jobId) {
+        return ResponseEntity.of(ocrImports.find(jobId));
+    }
+
+    @PostMapping("/pdf-imports/{jobId}/retry")
+    @Operation(summary = "重试 PDF OCR 导入任务")
+    public ResponseEntity<?> retryPdfImport(@PathVariable UUID jobId) {
+        try {
+            var job = ocrImports.retry(jobId);
+            if (job.isEmpty()) {
+                return ResponseEntity.notFound().build();
+            }
+            if (job.get().status() == OcrImportJob.Status.SUCCEEDED) {
+                return ResponseEntity.status(HttpStatus.CONFLICT).body(Map.of("error", "OCR 导入任务已成功"));
+            }
+            return acceptedPdfImport(job.get());
+        } catch (IllegalStateException e) {
             return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
         }
+    }
+
+    private static ResponseEntity<OcrImportJob> acceptedPdfImport(OcrImportJob job) {
+        return ResponseEntity.accepted().location(URI.create("/api/documents/pdf-imports/" + job.jobId())).body(job);
     }
 
     @PostMapping(value = "/excel", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
@@ -194,6 +242,26 @@ public class DocumentController {
                     .contentLength(original.content().length).body(original.content());
         } catch (IllegalStateException e) {
             return ResponseEntity.status(404).body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    @GetMapping("/{documentId}/pdf-pages/{page}")
+    @Operation(summary = "预览原始 PDF 页面")
+    public ResponseEntity<?> previewPdfPage(@PathVariable String documentId, @PathVariable int page) {
+        try {
+            var original = documentService.loadSource(documentId);
+            if (!original.fileName().toLowerCase(Locale.ROOT).endsWith(".pdf")) {
+                return ResponseEntity.badRequest().body(Map.of("error", "仅支持 PDF 页面预览"));
+            }
+            byte[] png = ocrPdfPages.preview(original.content(), page);
+            return ResponseEntity.ok().header("X-Content-Type-Options", "nosniff")
+                    .contentType(MediaType.IMAGE_PNG).contentLength(png.length).body(png);
+        } catch (IllegalStateException e) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("error", e.getMessage()));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        } catch (IOException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", "无法渲染 PDF 页面"));
         }
     }
 }

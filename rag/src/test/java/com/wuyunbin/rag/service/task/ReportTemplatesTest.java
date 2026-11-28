@@ -43,7 +43,7 @@ class ReportTemplatesTest {
         var runner = mock(DocumentTaskRunner.class);
         var validator = mock(DocumentTaskValidator.class);
         var service = new DocumentTaskService(validator, store, mock(GeneratedDocumentStorage.class),
-                mock(TaskArtifactService.class), runner);
+                mock(TaskArtifactService.class), runner, new DocumentTaskProperties());
         var original = DocumentTask.create(DocumentTaskType.REPORT, List.of("a"), "旧总要求");
         var archived = new ReportConfiguration("ANALYSIS", "retired", "旧模板",
                 List.of(new ReportConfiguration.Section("old-only", "历史章节", true, "旧要求")),
@@ -57,6 +57,39 @@ class ReportTemplatesTest {
         assertEquals(archived, retry.configuration());
         assertEquals(DocumentTaskStatus.FAILED, store.find(original.getTaskId()).orElseThrow().getStatus());
         verify(runner).submit(retry.taskId());
+    }
+
+    @Test
+    void snapshotsRetrievalSettingsAndRetriesUseTheSavedBudget() {
+        var settings = new DocumentTaskProperties();
+        settings.setRetrievalStrategy("full");
+        settings.setMaxContextChars(14000);
+        var store = new InMemoryDocumentTaskStore();
+        var service = new DocumentTaskService(mock(DocumentTaskValidator.class), store,
+                mock(GeneratedDocumentStorage.class), mock(TaskArtifactService.class),
+                mock(DocumentTaskRunner.class), settings);
+        var original = service.createAndExecute(new DocumentTaskRequest(DocumentTaskType.REPORT, List.of("a"), "查找证据"));
+        assertEquals(new ReportRetrievalSettings("full", 8, 0.5, 14000, 8000),
+                original.configuration().retrieval());
+        var failed = store.find(original.taskId()).orElseThrow();
+        failed.markFailed("模型超时");
+        store.save(failed);
+
+        settings.setRetrievalStrategy("baseline");
+        settings.setMaxContextChars(6000);
+
+        assertEquals(original.configuration(), service.retry(original.taskId()).configuration());
+    }
+
+    @Test
+    void snapshotsTheNewStrategyAsItsOwnVersion() {
+        var properties = new DocumentTaskProperties();
+        properties.setRetrievalStrategy("full-v2");
+        var settings = properties.snapshotRetrieval();
+
+        assertEquals("full-v2", settings.strategy());
+        assertTrue(settings.splitQuestions());
+        assertTrue(settings.strict());
     }
 
     @Test
@@ -81,7 +114,8 @@ class ReportTemplatesTest {
         var runner = new DocumentTaskRunner(tasks, generator, model, exporter, results, artifacts,
                 mock(EvidenceIntegrityValidator.class), mock(TaskProgressPublisher.class),
                 mock(com.wuyunbin.rag.service.generation.OriginalPassages.class), Runnable::run);
-        var service = new DocumentTaskService(mock(DocumentTaskValidator.class), tasks, results, artifacts, runner);
+        var service = new DocumentTaskService(mock(DocumentTaskValidator.class), tasks, results, artifacts, runner,
+                new DocumentTaskProperties());
         var task = DocumentTask.create(DocumentTaskType.REPORT, List.of("a"), "生成");
         tasks.save(task);
         var doc = new GeneratedDocument("历史报告", "摘要", List.of(), List.of());

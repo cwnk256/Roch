@@ -1,17 +1,10 @@
 package com.wuyunbin.rag.service.comparison;
 
-import com.wuyunbin.rag.dto.RetrievedChunk;
-
-import java.util.ArrayList;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.function.Predicate;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/** Parses explicit sentence-level facts. Unrecognized forms still go through the model extractor. */
+/** 只补齐已选引文中的明确字段，取证范围由提取器决定。 */
 final class ExplicitComparisonFacts {
-    private static final Pattern SENTENCE = Pattern.compile("[^。！？；\\r\\n]+[。！？；]?");
     private static final String NUMBER = "[+-]?(?:\\d{1,3}(?:,\\d{3})+|\\d+)(?:\\.\\d+)?";
     private static final Pattern PERIODIC = Pattern.compile("周期|间隔|频次|频率|多久|每隔");
     private static final Pattern OPERATION = Pattern.compile("校准|校验|校正|巡检|检修|检查|检测|维护|保养");
@@ -28,49 +21,37 @@ final class ExplicitComparisonFacts {
     private static final Pattern SAFETY_MODAL = Pattern.compile("必须|务必|不得|禁止|严禁|不得不|应当|无需|不必|可以|建议|须|应");
     private static final Pattern SERVICE = Pattern.compile("检修|维修|维护|保养|作业");
 
-    record Selection(List<ComparisonCandidate> facts, boolean needsModel, Predicate<String> relevant) {}
-
-    static Selection select(String dimension, List<RetrievedChunk> chunks) {
+    static ComparisonCandidate completeFields(String dimension, ComparisonCandidate selected) {
+        String quote = selected.quote();
         boolean cycle = PERIODIC.matcher(dimension).find();
         boolean money = BUDGET.matcher(dimension).find();
-        boolean safety = POWER.matcher(dimension).find();
-        if ((!cycle && !money && !safety) || (cycle && money) || (safety && (cycle || money))) {
-            return new Selection(List.of(), true, quote -> true);
-        }
-        Predicate<String> relevant = quote -> {
-            if (money) return BUDGET.matcher(quote).find();
-            if (safety) return POWER.matcher(quote).find();
+        boolean power = POWER.matcher(dimension).find();
+        ComparisonCandidate recognized = null;
+        if (money && !cycle && !power) {
+            recognized = amount(selected.source(), quote);
+        } else if (power && !cycle && !money && POWER.matcher(quote).find()) {
+            recognized = safety(selected.source(), quote);
+        } else if (cycle && !money && !power) {
             String operation = match(OPERATION, dimension);
-            return (PERIODIC.matcher(quote).find() || quote.contains("每") || quote.contains("定期"))
-                    && (operation.isEmpty() || operationKey(operation).equals(operationKey(match(OPERATION, quote))));
-        };
-        var facts = new LinkedHashMap<String, ComparisonCandidate>();
-        boolean unresolved = false;
-        for (int index = 0; index < chunks.size(); index++) {
-            Matcher sentences = SENTENCE.matcher(chunks.get(index).content());
-            while (sentences.find()) {
-                String quote = sentences.group().strip();
-                if (quote.length() > 1000 || !relevant.test(quote)) continue;
-                int source = index + 1;
-                ComparisonCandidate candidate = money ? amount(source, quote)
-                        : cycle ? interval(source, quote) : safety(source, quote);
-                if (candidate == null) unresolved = true;
-                else facts.putIfAbsent(quote, candidate);
+            if ((PERIODIC.matcher(quote).find() || quote.contains("每") || quote.contains("定期"))
+                    && (operation.isEmpty() || operationKey(operation).equals(operationKey(match(OPERATION, quote))))) {
+                recognized = interval(selected.source(), quote);
             }
         }
-        return new Selection(facts.values().stream().limit(ComparisonExtractor.MAX_FACTS).toList(),
-                unresolved && facts.size() < ComparisonExtractor.MAX_FACTS, relevant);
+        if (recognized == null) return selected;
+
+        String rawValue = fillIfBlank(selected.rawValue(), recognized.rawValue());
+        String unit = rawValue.strip().equals(recognized.rawValue().strip())
+                ? fillIfBlank(selected.unit(), recognized.unit()) : selected.unit();
+        return new ComparisonCandidate(selected.source(), quote,
+                fillIfBlank(selected.object(), recognized.object()),
+                fillIfBlank(selected.period(), recognized.period()),
+                fillIfBlank(selected.condition(), recognized.condition()),
+                fillIfBlank(selected.metric(), recognized.metric()), rawValue, unit);
     }
 
-    static List<ComparisonCandidate> merge(Selection selection, List<ComparisonCandidate> inferred) {
-        List<ComparisonCandidate> facts = new ArrayList<>(selection.facts());
-        for (ComparisonCandidate candidate : inferred) {
-            if (facts.size() >= ComparisonExtractor.MAX_FACTS) break;
-            if (selection.relevant().test(candidate.quote()) && facts.stream().noneMatch(f -> f.quote().equals(candidate.quote()))) {
-                facts.add(candidate);
-            }
-        }
-        return facts;
+    private static String fillIfBlank(String value, String fromQuote) {
+        return value == null || value.isBlank() ? fromQuote : value;
     }
 
     private static ComparisonCandidate amount(int source, String quote) {

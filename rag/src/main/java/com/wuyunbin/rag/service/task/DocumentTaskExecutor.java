@@ -3,14 +3,18 @@ package com.wuyunbin.rag.service.task;
 import com.wuyunbin.rag.dto.*;
 import com.wuyunbin.rag.retrieval.ChunkRetriever;
 import com.wuyunbin.rag.retrieval.DocumentRetriever;
+import com.wuyunbin.rag.retrieval.RetrievalMode;
 import com.wuyunbin.rag.service.DocumentService;
 import com.wuyunbin.rag.service.comparison.ComparisonGenerator;
 import com.wuyunbin.rag.service.generation.DocumentSummaryGenerator;
 import com.wuyunbin.rag.service.generation.GeneratedDocumentAssembler;
 import com.wuyunbin.rag.service.generation.OutlineGenerator;
+import com.wuyunbin.rag.service.generation.LlmSectionGenerator;
 import com.wuyunbin.rag.service.generation.SectionGenerator;
 import com.wuyunbin.rag.service.generation.model.GeneratedDocument;
 import com.wuyunbin.rag.service.generation.model.GeneratedSection;
+import com.wuyunbin.rag.service.generation.model.Claim;
+import com.wuyunbin.rag.service.generation.model.Evidence;
 import com.wuyunbin.rag.service.generation.model.ReportPlan;
 import com.wuyunbin.rag.service.generation.model.ReportSectionPlan;
 import lombok.RequiredArgsConstructor;
@@ -49,6 +53,10 @@ public class DocumentTaskExecutor {
     private final GeneratedDocumentAssembler assembler;
     private final DocumentService documentService;
     private final ComparisonGenerator comparisonGenerator;
+    private final TaskEvidenceRetrieval taskRetrieval;
+    private final TaskEvidenceLog evidenceLog;
+    private final DocumentTaskProperties properties;
+    private static final int QUESTIONS_PER_BATCH = 4;
 
     /**
      * 复用既有 RAG 检索配置，不新增 task 专属检索参数。
@@ -61,16 +69,17 @@ public class DocumentTaskExecutor {
 
     /**
      * 执行文档生成，返回结构化文档（尚未导出为文件）。
-     * 任一章节生成失败将抛出异常，由 Service 转为任务 FAILED（不静默跳过章节）。
      */
     public GeneratedDocument execute(DocumentTask task) {
         if (task.getType() == DocumentTaskType.COMPARE) {
             return comparisonGenerator.generate(task, defaultTopK, defaultThreshold);
         }
         Set<String> documentIds = new LinkedHashSet<>(task.getDocumentIds());
-        RetrievalOptions options = new RetrievalOptions(defaultTopK, defaultThreshold, documentIds);
-
         ReportConfiguration configuration = task.getConfiguration();
+        ReportRetrievalSettings settings = configuration == null ? null : configuration.retrieval();
+        var options = new RetrievalOptions(settings == null ? defaultTopK : settings.topK(),
+                settings == null ? defaultThreshold : settings.threshold(), documentIds,
+                settings == null ? null : settings.hybrid() ? RetrievalMode.HYBRID : settings.baselineMode());
         ReportPlan plan;
         if (configuration != null && configuration.templateId() != null) {
             plan = configuration.toPlan();
@@ -78,13 +87,26 @@ public class DocumentTaskExecutor {
             List<RetrievedDocument> hits = documentRetriever.search(task.getInstruction(), options);
             plan = outlineGenerator.generate(task.getInstruction(), task.getType(), ensureAllSelectedDocuments(documentIds, hits));
         }
-        // 3. 逐章节：章节级 Chunk 检索 + LLM 生成（章节失败直接抛出，整任务 FAILED）
         List<GeneratedSection> sections = new ArrayList<>();
-        for (ReportSectionPlan sectionPlan : plan.sections()) {
-            String sectionQuery = buildSectionQuery(sectionPlan);
-            List<RetrievedChunk> chunks = chunkRetriever.search(sectionQuery, options);
-            GeneratedSection section = sectionGenerator.generate(task.getType(), sectionPlan, chunks, documentIds);
-            sections.add(section);
+        GenerationProgress progress = new GenerationProgress();
+        for (int index = 0; index < plan.sections().size(); index++) {
+            ReportSectionPlan section = plan.sections().get(index);
+            if (settings != null && settings.hybrid()) {
+                sections.add(generateEnhancedSection(task, section, index + 1, documentIds, settings, progress));
+            } else {
+                long start = System.nanoTime();
+                List<RetrievedChunk> hits = chunkRetriever.search(buildSectionQuery(section), options);
+                int budget = settings == null ? properties.getMaxContextChars() : settings.reportMaxChars();
+                List<RetrievedChunk> selected = LlmSectionGenerator.selectWithinBudget(hits, documentIds, budget);
+                evidenceLog.event(task.getTaskId(), index + 1, 1, "context", "selected", hits.size(), selected, start);
+                sections.add(settings == null
+                        ? sectionGenerator.generate(task.getType(), section, hits, documentIds)
+                        : sectionGenerator.generateBatch(task.getType(), section, selected, documentIds,
+                                section.title(), false));
+            }
+        }
+        if (progress.lastFailure != null && progress.completed == 0) {
+            throw progress.lastFailure;
         }
 
         // 4. 整体摘要 + 组装（章节保序、Evidence 去重）
@@ -94,6 +116,141 @@ public class DocumentTaskExecutor {
         log.info("[DocumentTask] taskId={} 文档生成完成 title={} sections={} references={}",
                 task.getTaskId(), document.title(), document.sections().size(), document.references().size());
         return document;
+    }
+
+    private GeneratedSection generateEnhancedSection(DocumentTask task, ReportSectionPlan section, int sectionNumber,
+                                                       Set<String> scope, ReportRetrievalSettings settings,
+                                                       GenerationProgress progress) {
+        var questions = TaskEvidenceRetrieval.questions(section.purpose());
+        List<String> items = settings.splitQuestions() ? questions.items() : List.of();
+        if (items.isEmpty()) {
+            return generateBatch(task, section, sectionNumber, 1, scope, settings, settings.reportMaxChars(),
+                    List.of(buildSectionQuery(section)), false, progress);
+        }
+        List<GeneratedSection> batches = new ArrayList<>();
+        for (int start = 0; start < items.size(); start += QUESTIONS_PER_BATCH) {
+            int end = Math.min(start + QUESTIONS_PER_BATCH, items.size());
+            List<String> batch = items.subList(start, end);
+            StringBuilder purpose = new StringBuilder(questions.scope()).append("\n只回答以下问题，按题号顺序逐项给出事实：");
+            for (int index = 0; index < batch.size(); index++) {
+                purpose.append('\n').append(index + 1).append(". ").append(batch.get(index));
+            }
+            int endBudget = (int) ((long) settings.reportMaxChars() * end / items.size());
+            int startBudget = (int) ((long) settings.reportMaxChars() * start / items.size());
+            var batchPlan = new ReportSectionPlan(section.title(), purpose.toString());
+            batches.add(generateBatch(task, batchPlan, sectionNumber, batches.size() + 1, scope, settings,
+                    endBudget - startBudget, batch, true, progress));
+        }
+        Map<String, Evidence> snapshots = new LinkedHashMap<>();
+        List<Claim> claims = new ArrayList<>();
+        StringJoiner content = new StringJoiner("\n");
+        for (GeneratedSection batch : batches) {
+            content.add(batch.content());
+            claims.addAll(batch.claims());
+            batch.evidences().forEach(evidence -> snapshots.putIfAbsent(evidence.evidenceId(), evidence));
+        }
+        return new GeneratedSection(section.title(), content.toString(), List.copyOf(snapshots.values()), claims);
+    }
+
+    private GeneratedSection generateBatch(DocumentTask task, ReportSectionPlan section, int sectionNumber, int batchNumber,
+                                             Set<String> scope, ReportRetrievalSettings settings, int budget,
+                                             List<String> queries, boolean split, GenerationProgress progress) {
+        String batchId = "C-" + sectionNumber + "-" + batchNumber + "-";
+        long start = System.nanoTime();
+        List<List<RetrievedChunk>> candidateLists = new ArrayList<>();
+        RuntimeException retrievalFailure = null;
+        int successfulQueries = 0;
+        for (String query : queries) {
+            try {
+                candidateLists.add(taskRetrieval.hybrid(query, scope, settings));
+                successfulQueries++;
+            } catch (RuntimeException ex) {
+                evidenceLog.event(task.getTaskId(), sectionNumber, batchNumber, "retrieval", "failed", 0, List.of(), start);
+                if (!settings.strict()) throw ex;
+                retrievalFailure = ex;
+                candidateLists.add(List.of());
+            }
+        }
+        if (successfulQueries == 0) {
+            progress.lastFailure = retrievalFailure;
+            return missingBatch(section, batchId, queries, split, "检索失败");
+        }
+        int candidates = candidateLists.stream().mapToInt(List::size).sum();
+        List<RetrievedChunk> selected = split
+                ? TaskEvidenceRetrieval.balance(candidateLists, scope, budget)
+                : LlmSectionGenerator.selectWithinBudget(candidateLists.getFirst().stream().limit(settings.topK()).toList(),
+                        scope, budget);
+        List<List<String>> supplementalMatches = Collections.nCopies(queries.size(), List.of());
+        if (settings.anchored() && split) {
+            try {
+                var supplement = taskRetrieval.supplement(queries, selected, scope, budget);
+                selected = supplement.selected();
+                candidates += supplement.candidateCount();
+                supplementalMatches = supplement.matchesByQuestion();
+            } catch (RuntimeException ex) {
+                if (Thread.currentThread().isInterrupted()) throw ex;
+                evidenceLog.event(task.getTaskId(), sectionNumber, batchNumber, "retrieval",
+                        "supplement-failed", 0, List.of(), start);
+            }
+        }
+        evidenceLog.event(task.getTaskId(), sectionNumber, batchNumber, "context",
+                selected.isEmpty() ? "empty" : "selected", candidates, selected, start);
+        if (selected.isEmpty() && split) {
+            if (settings.anchored()) evidenceLog.anchors(task.getTaskId(), sectionNumber, batchNumber, List.of(), start);
+            progress.completed++;
+            return missingBatch(section, batchId, queries, true, "未检索到可用依据");
+        }
+        long generationStart = System.nanoTime();
+        try {
+            GeneratedSection result = settings.anchored()
+                    ? sectionGenerator.generateAnchoredBatch(task.getType(), section, selected, scope, batchId, budget,
+                            questionEvidence(queries, candidateLists, supplementalMatches),
+                            spans -> evidenceLog.anchors(task.getTaskId(), sectionNumber, batchNumber, spans, generationStart))
+                    : sectionGenerator.generateBatch(task.getType(), section, selected, scope, batchId, settings.strict());
+            progress.completed++;
+            evidenceLog.event(task.getTaskId(), sectionNumber, batchNumber, "generation", "completed",
+                    candidates, List.of(), generationStart);
+            return result;
+        } catch (SectionGenerator.BatchFailure ex) {
+            evidenceLog.event(task.getTaskId(), sectionNumber, batchNumber, "generation", ex.failureKind().name(),
+                    candidates, List.of(), generationStart);
+            if (!settings.strict()) throw ex;
+            progress.lastFailure = ex;
+            return missingBatch(section, batchId, queries, split, "本批次生成失败");
+        }
+    }
+
+    private static List<SectionGenerator.QuestionEvidence> questionEvidence(List<String> queries,
+                                                                            List<List<RetrievedChunk>> candidates,
+                                                                            List<List<String>> supplements) {
+        var questions = new ArrayList<SectionGenerator.QuestionEvidence>();
+        for (int index = 0; index < queries.size(); index++) {
+            Set<String> chunkIds = new LinkedHashSet<>();
+            candidates.get(index).stream().filter(Objects::nonNull).map(RetrievedChunk::chunkId)
+                    .filter(Objects::nonNull).forEach(chunkIds::add);
+            chunkIds.addAll(supplements.get(index));
+            questions.add(new SectionGenerator.QuestionEvidence(index + 1, queries.get(index), List.copyOf(chunkIds)));
+        }
+        return List.copyOf(questions);
+    }
+
+    private static GeneratedSection missingBatch(ReportSectionPlan section, String id, List<String> queries,
+                                                  boolean split, String reason) {
+        var claims = new ArrayList<Claim>();
+        if (split) {
+            for (String question : queries) {
+                claims.add(Claim.unsupported(id + (claims.size() + 1), question + "（" + reason + "）", reason));
+            }
+        } else {
+            claims.add(Claim.unsupported(id + "1", section.title() + "（" + reason + "）", reason));
+        }
+        return new GeneratedSection(section.title(),
+                String.join("\n", claims.stream().map(Claim::text).toList()), List.of(), claims);
+    }
+
+    private static class GenerationProgress {
+        int completed;
+        RuntimeException lastFailure;
     }
 
     /**

@@ -41,6 +41,8 @@ class DocumentTaskExecutorTest {
     private DocumentSummaryGenerator summaryGenerator;
     private DocumentService documentService;
     private DocumentTaskExecutor executor;
+    private TaskEvidenceRetrieval taskRetrieval;
+    private TaskEvidenceLog evidenceLog;
 
     @BeforeEach
     @SuppressWarnings("unchecked")
@@ -53,10 +55,13 @@ class DocumentTaskExecutorTest {
         documentService = mock(DocumentService.class);
         // 组装器使用真实实现，连带验证章节保序 + Evidence 去重
         GeneratedDocumentAssembler assembler = new GeneratedDocumentAssembler();
+        taskRetrieval = mock(TaskEvidenceRetrieval.class);
+        evidenceLog = mock(TaskEvidenceLog.class);
 
         executor = new DocumentTaskExecutor(
                 documentRetriever, chunkRetriever, outlineGenerator,
-                sectionGenerator, summaryGenerator, assembler, documentService, mock(ComparisonGenerator.class));
+                sectionGenerator, summaryGenerator, assembler, documentService, mock(ComparisonGenerator.class),
+                taskRetrieval, evidenceLog, new DocumentTaskProperties());
         ReflectionTestUtils.setField(executor, "defaultTopK", 8);
         ReflectionTestUtils.setField(executor, "defaultThreshold", 0.5);
     }
@@ -192,5 +197,95 @@ class DocumentTaskExecutorTest {
         // 章节失败必须向上抛出（由 Service 转为整个任务 FAILED，不静默跳过）
         RuntimeException ex = assertThrows(RuntimeException.class, () -> executor.execute(task));
         assertTrue(ex.getMessage().contains("LLM 服务不可用"));
+    }
+
+    @Test
+    void fullStrategyKeepsTheSuccessfulBatchWhenAnotherBatchTimesOut() {
+        DocumentTask task = runningTask();
+        var settings = new ReportRetrievalSettings("full", 8, 0.35, 40, 40);
+        var plan = new ReportConfiguration("ANALYSIS", "1", "报告",
+                List.of(new ReportConfiguration.Section("findings", "事实", true, "保留条件。")),
+                "1. 数量\n2. 条件\n3. 金额\n4. 时间\n5. 范围",
+                null, List.of(), null, null).withRetrieval(settings);
+        task.setConfiguration(plan);
+        when(taskRetrieval.hybrid(anyString(), eq(SELECTED), eq(settings)))
+                .thenAnswer(call -> List.of(new RetrievedChunk(call.getArgument(0), "docA", "a.txt",
+                        "示例", "", null, null, 0, 0.8)));
+        var known = new Claim("C-1-1-1", "已处理", List.of(), SupportStatus.INSUFFICIENT, "测试", true);
+        when(sectionGenerator.generateBatch(any(), any(), anyList(), eq(SELECTED), eq("C-1-1-"), eq(true)))
+                .thenReturn(new GeneratedSection("事实", "已处理", List.of(), List.of(known)));
+        when(sectionGenerator.generateBatch(any(), any(), anyList(), eq(SELECTED), eq("C-1-2-"), eq(true)))
+                .thenThrow(new SectionGenerator.BatchFailure(SectionGenerator.BatchFailureKind.TIMEOUT, null));
+        when(summaryGenerator.generateSummary(anyString(), anyString(), anyList()))
+                .thenReturn(new VerifiedSummary("摘要", List.of(), List.of()));
+
+        var section = executor.execute(task).sections().getFirst();
+        assertEquals(List.of("C-1-1-1", "C-1-2-1"), section.claims().stream().map(Claim::claimId).toList());
+        assertTrue(section.content().contains("已处理"));
+        assertTrue(section.content().contains("范围（本批次生成失败）"));
+        verify(taskRetrieval, times(5)).hybrid(anyString(), eq(SELECTED), eq(settings));
+        verifyNoMoreInteractions(taskRetrieval);
+        verifyNoInteractions(chunkRetriever);
+    }
+
+    @Test
+    void anchoredStrategyGeneratesAndLogsTheActualSupplementedBatch() {
+        DocumentTask task = runningTask();
+        var settings = new ReportRetrievalSettings("full-v2", 8, 0.35, 120, 40);
+        String question = "维护周期是多少？";
+        task.setConfiguration(new ReportConfiguration("ANALYSIS", "1", "报告",
+                List.of(new ReportConfiguration.Section("findings", "事实", true, "保留条件。")),
+                "1. " + question, null, List.of(), null, null).withRetrieval(settings));
+        var original = chunk("original", "docA", "a.pdf", 1, 1, 0.9);
+        var added = chunk("added", "docA", "a.pdf", 2, 2, 0.0);
+        var selected = List.of(original, added);
+        var questions = List.of(new SectionGenerator.QuestionEvidence(1, question, List.of("original", "added")));
+        var section = new GeneratedSection("事实", "已处理", List.of());
+        when(taskRetrieval.hybrid(question, SELECTED, settings)).thenReturn(List.of(original));
+        when(taskRetrieval.supplement(List.of(question), List.of(original), SELECTED, 120))
+                .thenReturn(new TaskEvidenceRetrieval.Supplement(selected, 3, List.of(List.of("added"))));
+        when(sectionGenerator.generateAnchoredBatch(any(), any(), eq(selected), eq(SELECTED), eq("C-1-1-"), eq(120),
+                eq(questions), any()))
+                .thenReturn(section);
+        when(summaryGenerator.generateSummary(anyString(), anyString(), anyList()))
+                .thenReturn(new VerifiedSummary("摘要", List.of(), List.of()));
+
+        assertEquals("已处理", executor.execute(task).sections().getFirst().content());
+        verify(sectionGenerator).generateAnchoredBatch(eq(DocumentTaskType.REPORT), any(), eq(selected),
+                eq(SELECTED), eq("C-1-1-"), eq(120), eq(questions), any());
+        verify(sectionGenerator, never()).generateBatch(any(), any(), any(), any(), any(), anyBoolean());
+        verify(evidenceLog).event(eq(task.getTaskId()), eq(1), eq(1), eq("context"), eq("selected"),
+                eq(4), eq(selected), anyLong());
+    }
+
+    @Test
+    void anchoredStrategyPassesRankedRetrievalMembershipForEachQuestion() {
+        DocumentTask task = runningTask();
+        var settings = new ReportRetrievalSettings("full-v2", 8, 0.35, 120, 40);
+        String firstQuestion = "维护周期是多少？";
+        String secondQuestion = "谁负责巡检？";
+        task.setConfiguration(new ReportConfiguration("ANALYSIS", "1", "报告",
+                List.of(new ReportConfiguration.Section("findings", "事实", true, "保留条件。")),
+                "1. " + firstQuestion + "\n2. " + secondQuestion, null, List.of(), null, null).withRetrieval(settings));
+        var lead = chunk("lead", "docA", "a.pdf", 1, 1, 0.9);
+        var inspector = chunk("inspector", "docA", "a.pdf", 2, 2, 0.9);
+        var optional = chunk("optional", "docA", "a.pdf", 3, 3, 0.6);
+        var selected = List.of(lead, inspector, optional);
+        var questions = List.of(new SectionGenerator.QuestionEvidence(1, firstQuestion, List.of("lead", "optional")),
+                new SectionGenerator.QuestionEvidence(2, secondQuestion, List.of("inspector", "lead")));
+        var section = new GeneratedSection("事实", "已处理", List.of());
+        when(taskRetrieval.hybrid(firstQuestion, SELECTED, settings)).thenReturn(List.of(lead, optional));
+        when(taskRetrieval.hybrid(secondQuestion, SELECTED, settings)).thenReturn(List.of(inspector, lead));
+        when(taskRetrieval.supplement(List.of(firstQuestion, secondQuestion), selected, SELECTED, 120))
+                .thenReturn(new TaskEvidenceRetrieval.Supplement(selected, 0, List.of(List.of(), List.of())));
+        when(sectionGenerator.generateAnchoredBatch(any(), any(), eq(selected), eq(SELECTED), eq("C-1-1-"), eq(120),
+                eq(questions), any())).thenReturn(section);
+        when(summaryGenerator.generateSummary(anyString(), anyString(), anyList()))
+                .thenReturn(new VerifiedSummary("摘要", List.of(), List.of()));
+
+        executor.execute(task);
+
+        verify(sectionGenerator).generateAnchoredBatch(eq(DocumentTaskType.REPORT), any(), eq(selected), eq(SELECTED),
+                eq("C-1-1-"), eq(120), eq(questions), any());
     }
 }

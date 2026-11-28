@@ -1,5 +1,5 @@
 import {http} from './http'
-import type {Artifact, DocumentMeta, PageResponse, PageResult, SearchResponse, Task} from '../types'
+import type {Artifact, DocumentImportResult, DocumentMeta, PageResponse, PageResult, PdfImportJob, SearchResponse, Task} from '../types'
 
 import type {Report, ReportTemplate, ExportOptions} from '../lib/report'
 
@@ -9,6 +9,14 @@ export type Conversation = {
     createdAt: string
     updatedAt: string
 }
+
+function uploadForm(file: File) {
+    const form = new FormData()
+    form.append('file', file)
+    return form
+}
+
+type PdfUploadResult = {kind: 'completed'; result: DocumentImportResult} | {kind: 'ocr'; job: PdfImportJob}
 
 export const api = {
     chat: (message: string) => http.post<{ reply: string }>('/chat', {message}).then(r => r.data),
@@ -95,11 +103,20 @@ export const api = {
     document: (id: string) => http.get<DocumentMeta>(`/documents/${id}`).then(r => r.data),
     chunks: (id: string, params = {}) => http.get<PageResult<Record<string, unknown>>>(`/documents/${id}/chunks`, {params}).then(r => r.data),
     search: (payload: Record<string, unknown>) => http.post<SearchResponse>('/documents/search', payload).then(r => r.data),
-    upload: (file: File, kind: string) => {
-        const form = new FormData();
-        form.append('file', file);
-        return http.post(`/documents${kind ? `/${kind}` : ''}`, form).then(r => r.data)
+    upload: (file: File, kind: string) =>
+        http.post<DocumentImportResult>(`/documents${kind ? `/${kind}` : ''}`, uploadForm(file)).then(r => r.data),
+    async importPdf(file: File): Promise<PdfUploadResult> {
+        const response = await http.post<DocumentImportResult | PdfImportJob>('/documents/pdf', uploadForm(file), {
+            params: {ocr: 'auto'}
+        })
+        return response.status === 202
+            ? {kind: 'ocr', job: response.data as PdfImportJob}
+            : {kind: 'completed', result: response.data as DocumentImportResult}
     },
+    pdfImport: (jobId: string, signal?: AbortSignal) =>
+        http.get<PdfImportJob>(`/documents/pdf-imports/${encodeURIComponent(jobId)}`, {signal, timeout: 10000}).then(r => r.data),
+    retryPdfImport: (jobId: string) =>
+        http.post<PdfImportJob>(`/documents/pdf-imports/${encodeURIComponent(jobId)}/retry`).then(r => r.data),
     deleteDocument: (id: string) => http.delete(`/documents/${id}`).then(r => r.data),
     reindex: (id: string, file?: File) => {
         const form = new FormData();

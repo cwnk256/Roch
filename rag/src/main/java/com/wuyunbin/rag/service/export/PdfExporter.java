@@ -495,6 +495,8 @@ public class PdfExporter implements DocumentExporter {
                 parts.add("第 " + pages + " 页");
             }
             if (evidence.section() != null && !evidence.section().isBlank()) parts.add(evidence.section());
+            if (evidence.nativeLocation() != null && !evidence.nativeLocation().isBlank()
+                    && !evidence.nativeLocation().equals(evidence.section())) parts.add(evidence.nativeLocation());
             if (parts.size() == 1 && evidence.chunkIndex() != null) parts.add("切片 " + (evidence.chunkIndex() + 1));
             if (parts.size() == 1) parts.add("位置未记录");
             return String.join(" · ", parts);

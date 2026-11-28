@@ -119,7 +119,7 @@ class PdfExporterTest {
     @Test
     void reExportUsesSameSnapshotsWithEitherCitationStyle() throws Exception {
         Evidence source = new Evidence("docA", "设备维护手册.pdf", "chunk-1", null, 7, 7, .8,
-                "ev-12", "原文校准周期为30天。", SourceStatus.MATCHED, "parser-1", "sha256", 0, null);
+                "ev-12", "原文校准周期为30天。", SourceStatus.MATCHED, "parser-1", "sha256", 0, null, "页内字符 [16,31)");
         Claim claim = new Claim("cl-1", "校准周期为30天。", List.of("ev-12"), SupportStatus.SUPPORTED, "引文明确", true);
         Claim gap = Claim.unsupported("cl-2", "预计成本降低。", "未提供预测依据");
         Evidence mismatch = new Evidence("docA", "设备维护手册.pdf", "chunk-2", null, null, null, .4,
@@ -146,7 +146,7 @@ class PdfExporterTest {
         assertFalse(numberedWithoutAppendix.contains("证据附录"));
         assertContains(numbered, "原文校准周期为30天。");
         assertContains(numbered, "目录");
-        assertContains(named, "[设备维护手册.pdf · 第 7 页]");
+        assertContains(named, "[设备维护手册.pdf · 第 7 页 · 页内字符 [16,31)]");
         assertFalse(named.contains("目录"));
         assertFalse(named.contains("证据附录"));
         assertFalse(named.contains("原文校准周期为30天。"));

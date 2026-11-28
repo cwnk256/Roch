@@ -2,6 +2,7 @@ package com.wuyunbin.rag.service.task;
 
 import com.wuyunbin.rag.dto.DocumentTask;
 import com.wuyunbin.rag.dto.DocumentTaskRequest;
+import com.wuyunbin.rag.dto.DocumentTaskType;
 import com.wuyunbin.rag.dto.DocumentArtifactResponse;
 import com.wuyunbin.rag.dto.ReportExportOptions;
 import org.springframework.ai.chat.model.ChatModel;
@@ -60,8 +61,11 @@ public class DocumentTaskRunner {
             if (configuration == null) {
                 configuration = ReportTemplates.resolve(new DocumentTaskRequest(task.getType(), task.getDocumentIds(), task.getInstruction()));
             }
+            String promptVersion = configuration.retrieval() != null && configuration.retrieval().strict()
+                    ? "traceable-report-v3.0"
+                    : task.getType() == DocumentTaskType.COMPARE ? "traceable-report-v2.2" : "traceable-report-v2.1";
             GeneratedDocument result = generator.execute(task).withConfiguration(configuration.withGenerationMetadata(
-                    chatModel.getOptions().getModel(), "traceable-report-v2.1"));
+                    chatModel.getOptions().getModel(), promptVersion));
             evidenceValidator.validate(result, new HashSet<>(task.getDocumentIds()));
             results.save(taskId, result);
             task.updateProgress(75, "EXPORTING");

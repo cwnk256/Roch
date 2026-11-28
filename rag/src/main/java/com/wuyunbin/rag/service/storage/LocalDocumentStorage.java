@@ -6,6 +6,7 @@ import org.springframework.stereotype.Service;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.Optional;
 
 @Service
@@ -21,8 +22,22 @@ public class LocalDocumentStorage implements DocumentStorage {
         Path dir = root.resolve(documentId).normalize();
         if (!dir.startsWith(root)) throw new IOException("Invalid document id");
         Files.createDirectories(dir);
-        Files.write(dir.resolve("source.bin"), content);
-        Files.writeString(dir.resolve("filename"), fileName == null ? "document" : fileName);
+        replace(dir, "source.bin", content);
+        replace(dir, "filename", (fileName == null ? "document" : fileName)
+                .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    private void replace(Path dir, String name, byte[] content) throws IOException {
+        var target = dir.resolve(name);
+        if (Files.isRegularFile(target) && Files.size(target) == content.length
+                && java.util.Arrays.equals(Files.readAllBytes(target), content)) return;
+        Path temporary = Files.createTempFile(dir, ".source-", ".tmp");
+        try {
+            Files.write(temporary, content);
+            Files.move(temporary, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+        } finally {
+            Files.deleteIfExists(temporary);
+        }
     }
 
     @Override

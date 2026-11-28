@@ -61,6 +61,7 @@ venv/
 /scripts/*
 !/scripts/trace_report_acceptance.py
 !/scripts/trace_report_quality.py
+!/scripts/verify-fast.mjs
 
 ### 前端（Vue + Vite）构建产物与依赖 ###
 web/node_modules/

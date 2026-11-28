@@ -14,6 +14,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * PDF 文档解析器：提取文本并按字号统计检测标题，转为 ATX Markdown。
@@ -56,9 +57,32 @@ public class PdfDocumentParser {
         return String.join("\n\n", parsePages(inputStream).stream().map(PdfPage::content).toList());
     }
 
+    public record TableRow(int page, String caption, String row, List<String> facts) {}
+
+    public record NativeLayout(Map<Integer,String> pages, List<TableRow> rows, Set<Integer> invisibleTextPages) {}
+
+    public List<TableRow> physicalTableRows(InputStream input) throws IOException {
+        return nativeLayout(input).rows();
+    }
+
+    public NativeLayout nativeLayout(InputStream input) throws IOException {
+        try (PDDocument document = Loader.loadPDF(input.readAllBytes())) {
+            var layout = new PdfTableLayout();
+            layout.getText(document);
+            return new NativeLayout(Map.copyOf(layout.pageTexts), List.copyOf(layout.rows),
+                    Set.copyOf(layout.invisibleTextPages));
+        }
+    }
+
     public record PdfPage(int number, String content) {}
 
     public List<PdfPage> parsePages(InputStream inputStream) throws IOException {
+        var pages = parsePagesAllowEmpty(inputStream);
+        if (pages.isEmpty()) throw new IOException("PDF 文档正文内容为空");
+        return pages;
+    }
+
+    public List<PdfPage> parsePagesAllowEmpty(InputStream inputStream) throws IOException {
         try (PDDocument document = Loader.loadPDF(inputStream.readAllBytes())) {
             Map<Integer, List<LineInfo>> pages = new LinkedHashMap<>();
             LineCollectingStripper collector = new LineCollectingStripper(pages);
@@ -70,7 +94,6 @@ public class PdfDocumentParser {
                     .map(page -> new PdfPage(page.getKey(), buildMarkdown(page.getValue(), bodySize)))
                     .filter(page -> !page.content().isBlank())
                     .toList();
-            if (result.isEmpty()) throw new IOException("PDF 文档正文内容为空");
             return result;
         }
     }
@@ -97,7 +120,8 @@ public class PdfDocumentParser {
         boolean inParagraph = false;
 
         for (LineInfo line : lines) {
-            String text = line.text.strip();
+            // PDF 字体映射可能产生 NUL，PostgreSQL 文本字段无法存储它。
+            String text = line.text.replace("\0", "").strip();
 
             if (text.isEmpty()) {
                 if (inParagraph) {
