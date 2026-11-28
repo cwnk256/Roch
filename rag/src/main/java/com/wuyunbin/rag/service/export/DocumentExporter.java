@@ -1,5 +1,6 @@
 package com.wuyunbin.rag.service.export;
 
+import com.wuyunbin.rag.dto.ReportExportOptions;
 import com.wuyunbin.rag.service.generation.model.GeneratedDocument;
 
 /**
@@ -17,5 +18,9 @@ public interface DocumentExporter {
      * @param fileStem 落盘文件名主干（使用任务 ID，天然安全、唯一），最终文件为 {@code <fileStem>.pdf}
      * @return 导出结果（含用户可读文件名、落盘路径与 MIME 类型）
      */
-    ExportedFile export(GeneratedDocument document, String fileStem);
+    default ExportedFile export(GeneratedDocument document, String fileStem) {
+        return export(document, fileStem, null);
+    }
+
+    ExportedFile export(GeneratedDocument document, String fileStem, ReportExportOptions overrides);
 }

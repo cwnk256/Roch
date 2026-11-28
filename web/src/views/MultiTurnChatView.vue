@@ -1,8 +1,9 @@
 <script lang="ts" setup>
 import {computed, nextTick, onMounted, ref} from 'vue'
-import {Clock3, MessageSquare, MessageSquarePlus, RefreshCw, Send, Trash2, X} from 'lucide-vue-next'
+import {Clock3, MessageSquare, MessageSquarePlus, RefreshCw, Trash2, X} from 'lucide-vue-next'
 import {api, type Conversation} from '../api'
 import {scrollMessagesToBottom} from '../lib/chat-scroll'
+import ChatComposer from '../components/ChatComposer.vue'
 
 type Message = { role: string; content: string }
 const conversationId = ref('')
@@ -32,13 +33,13 @@ async function selectConversation(id: string) {
   conversationId.value = id
   try {
     messages.value = (await api.history(id)).messages || [];
-    await scrollToLatestMessage()
   } catch (e) {
     error.value = String(e);
     messages.value = []
   } finally {
     loadingHistory.value = false
   }
+  await scrollToLatestMessage()
 }
 
 async function newChat() {
@@ -148,36 +149,30 @@ onMounted(load)
 </script>
 
 <template>
-  <section class="page-intro">
-    <div><p class="eyebrow">CHAT / MEMORY</p>
-      <h2>多轮问答</h2>
-      <p>保留当前会话上下文，支持从历史会话继续追问，适合深度求索知识。</p></div>
+  <div class="page-intro">
+    <p>在当前会话中继续追问，或打开一段历史对话。</p>
     <div class="actions">
-      <button class="button" type="button" @click="newChat">
-        <MessageSquarePlus :size="15"/>
+      <button class="button primary" type="button" @click="newChat">
+        <MessageSquarePlus :size="15" aria-hidden="true"/>
         新会话
       </button>
-      <button aria-label="刷新会话列表" class="icon-button" title="刷新会话列表" type="button" @click="load">
-        <RefreshCw :size="16"/>
-      </button>
     </div>
-  </section>
+  </div>
   <div class="chat-workspace panel">
     <aside aria-label="历史会话" class="conversation-sidebar">
       <div class="conversation-sidebar-header">
-        <div><span class="eyebrow">HISTORY</span>
-          <h3>历史对话</h3></div>
-        <button aria-label="新建会话" class="icon-button" title="新建会话" type="button" @click="newChat">
-          <MessageSquarePlus :size="17"/>
+        <h2>历史对话</h2>
+        <button aria-label="刷新会话列表" class="icon-button" title="刷新会话列表" type="button" @click="load">
+          <RefreshCw :size="16" aria-hidden="true"/>
         </button>
       </div>
       <div v-if="!conversations.length" class="conversation-empty">暂无历史会话</div>
-      <nav v-else class="conversation-list">
+      <div v-else class="conversation-list">
         <div v-for="item in conversations" :key="item.conversationId"
              :class="{ active: item.conversationId === conversationId }" class="conversation-item">
-          <button class="conversation-item-main" type="button"
+          <button class="conversation-item-main" type="button" :aria-current="item.conversationId === conversationId ? 'true' : undefined"
                   @click="selectConversation(item.conversationId)">
-            <MessageSquare :size="15"/>
+            <MessageSquare :size="15" aria-hidden="true"/>
             <span class="conversation-item-copy"><strong>{{ titleOf(item) }}</strong><small><Clock3
                 :size="11"/>{{ formatTime(item.updatedAt) }}</small></span>
           </button>
@@ -192,41 +187,33 @@ onMounted(load)
             <X :size="15"/>
           </button>
         </div>
-      </nav>
+      </div>
     </aside>
     <section class="chat-panel">
       <header class="chat-panel-header">
-        <div><span class="eyebrow">CURRENT CONVERSATION</span>
-          <h3>{{ currentConversation ? titleOf(currentConversation) : '新会话' }}</h3></div>
+        <h2>{{ currentConversation ? titleOf(currentConversation) : '新会话' }}</h2>
         <button :disabled="!messages.length" class="button danger" type="button" @click="clearConversation">
           <Trash2 :size="15"/>
           清空记录
         </button>
       </header>
-      <div ref="messagePane" aria-label="消息记录" class="messages" tabindex="0">
-        <div v-if="loadingHistory" class="empty-state"><strong>正在加载历史记录</strong></div>
+      <div ref="messagePane" aria-label="消息记录" role="region" class="messages" tabindex="0">
+        <div v-if="loadingHistory" class="empty-state" role="status"><strong>正在加载历史记录</strong></div>
         <div v-else-if="!messages.length" class="empty-state"><strong>会话已准备好</strong><span>试试询问文档中的一个具体事实。</span>
         </div>
         <template v-else>
           <div v-for="(message, index) in messages" :key="index"
                :class="{ user: message.role === 'USER' || message.role === 'user' }" class="message"><span
-              class="message-label">{{ message.role === 'USER' || message.role === 'user' ? '你' : 'ROCH' }}</span>
+              class="message-label">{{ message.role === 'USER' || message.role === 'user' ? '你' : 'Roch' }}</span>
             <div class="message-bubble">
               <template v-if="message.content">{{ message.content }}</template>
-              <span v-else-if="loading && index === messages.length - 1" class="typing-placeholder">正在思考…</span>
+              <span v-else-if="loading && index === messages.length - 1" class="typing-placeholder" role="status">正在思考…</span>
             </div>
           </div>
         </template>
       </div>
-      <div v-if="error" class="notice error">{{ error }}</div>
-      <form class="chat-compose" @submit.prevent="send"><textarea v-model="input" aria-label="消息内容"
-                                                                  placeholder="继续追问…"
-                                                                  @keydown.enter.exact.prevent="send"/>
-        <button :disabled="loading" class="button primary" type="submit">
-          <Send :size="16"/>
-          发送
-        </button>
-      </form>
+      <div v-if="error" class="notice error" role="alert">{{ error }}</div>
+      <ChatComposer v-model="input" :loading="loading" placeholder="继续追问…" @send="send"/>
     </section>
   </div>
 </template>
@@ -236,38 +223,23 @@ onMounted(load)
   flex: 1;
   min-width: 0;
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 9px;
   text-align: left;
   border: 0;
   background: transparent;
   color: inherit;
   cursor: pointer;
-  padding: 0;
+  padding: var(--space-1) 0;
 }
+
+.conversation-item-main svg { flex: none }
 
 .conversation-item-delete {
   flex: none;
-  opacity: 0;
-  transition: opacity .15s;
-  color: #999;
+  color: var(--secondary);
 }
 
-.conversation-item:hover .conversation-item-delete {
-  opacity: 1;
-}
-
-.conversation-item-delete:hover {
-  color: #c0392b;
-}
-
-.typing-placeholder {
-  color: #9aa0a6;
-  animation: typing-blink 1.2s ease-in-out infinite;
-}
-
-@keyframes typing-blink {
-  0%, 100% { opacity: .35; }
-  50% { opacity: 1; }
-}
+.conversation-item-delete:hover { color: var(--danger) }
+.typing-placeholder { color: var(--secondary) }
 </style>

@@ -1,5 +1,9 @@
 package com.wuyunbin.rag.service.export;
 
+import com.wuyunbin.rag.dto.ReportExportOptions;
+import com.wuyunbin.rag.service.comparison.ComparisonResult;
+import com.wuyunbin.rag.service.comparison.ComparisonGenerator;
+import com.wuyunbin.rag.service.generation.model.Claim;
 import com.wuyunbin.rag.service.generation.model.Evidence;
 import com.wuyunbin.rag.service.generation.model.GeneratedDocument;
 import com.wuyunbin.rag.service.generation.model.GeneratedSection;
@@ -14,6 +18,9 @@ import org.apache.pdfbox.pdmodel.PDPage;
 import org.apache.pdfbox.pdmodel.PDPageContentStream;
 import org.apache.pdfbox.pdmodel.common.PDRectangle;
 import org.apache.pdfbox.pdmodel.font.PDType0Font;
+import org.apache.pdfbox.pdmodel.interactive.documentnavigation.destination.PDPageXYZDestination;
+import org.apache.pdfbox.pdmodel.interactive.documentnavigation.outline.PDDocumentOutline;
+import org.apache.pdfbox.pdmodel.interactive.documentnavigation.outline.PDOutlineItem;
 import org.springframework.core.io.Resource;
 import org.springframework.core.io.ResourceLoader;
 import org.springframework.stereotype.Component;
@@ -28,6 +35,8 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.List;
 import java.util.Set;
 import java.util.regex.Matcher;
@@ -96,7 +105,7 @@ public class PdfExporter implements DocumentExporter {
     // ============================== 文件名处理 ==============================
 
     @Override
-    public ExportedFile export(GeneratedDocument document, String fileStem) {
+    public ExportedFile export(GeneratedDocument document, String fileStem, ReportExportOptions overrides) {
         if (document == null) {
             throw new IllegalArgumentException("待导出文档不能为空");
         }
@@ -112,13 +121,16 @@ public class PdfExporter implements DocumentExporter {
         try (PDDocument pdf = new PDDocument();
              TrueTypeFont ttf = new TTFParser().parseEmbedded(new ByteArrayInputStream(loadFontBytes()))) {
             PDType0Font font = PDType0Font.load(pdf, ttf, true);
-            Layout layout = new Layout(pdf, font, ttf.getUnicodeCmapLookup());
+            ReportExportOptions options = ReportExportOptions.merge(
+                    document.configuration() == null ? null : document.configuration().exportOptions(), overrides);
+            Layout layout = new Layout(pdf, font, ttf.getUnicodeCmapLookup(), document, options);
             layout.writeCover(document);
             layout.writeSummary(document);
-            layout.writeTableOfContents(document);
+            if (options.includeToc()) layout.writeTableOfContents(document);
             layout.writeSections(document);
-            layout.writeReferences(document);
+            if (options.includeEvidenceAppendix()) layout.writeReferences(document);
             layout.close();
+            pdf.getDocumentCatalog().setDocumentOutline(layout.outline());
             pdf.save(output.toFile());
         } catch (IOException e) {
             throw new IllegalStateException("PDF 生成失败: " + output, e);
@@ -177,12 +189,28 @@ public class PdfExporter implements DocumentExporter {
         private final PDDocument pdf;
         private final PDType0Font font;
         private final CmapLookup unicodeCmap;
+        private final PDDocumentOutline outline = new PDDocumentOutline();
+
+        private final ReportExportOptions options;
+        private final boolean historical;
+        private final Map<String, Evidence> byEvidenceId = new LinkedHashMap<>();
+        private final Map<String, Integer> numbers = new LinkedHashMap<>();
+        private final Map<String, Claim> byClaimId = new LinkedHashMap<>();
 
         private PDPage page;
         private PDPageContentStream cs;
         private float y;
 
-        private Layout(PDDocument pdf, PDType0Font font, CmapLookup unicodeCmap) throws IOException {
+        private Layout(PDDocument pdf, PDType0Font font, CmapLookup unicodeCmap,
+                       GeneratedDocument document, ReportExportOptions options) throws IOException {
+            this.options = options;
+            this.historical = "v1".equals(document.schemaVersion());
+            for (Evidence evidence : document.evidenceSnapshots()) {
+                byEvidenceId.put(evidence.evidenceId(), evidence);
+                numbers.put(evidence.evidenceId(), numbers.size() + 1);
+            }
+            document.sections().forEach(section -> section.claims().forEach(claim -> byClaimId.put(claim.claimId(), claim)));
+            document.summaryClaims().forEach(claim -> byClaimId.put(claim.claimId(), claim));
             this.pdf = pdf;
             this.font = font;
             this.unicodeCmap = unicodeCmap;
@@ -208,6 +236,11 @@ public class PdfExporter implements DocumentExporter {
 
         private void close() throws IOException {
             cs.close();
+        }
+
+        private PDDocumentOutline outline() {
+            outline.openNode();
+            return outline;
         }
 
         /**
@@ -292,7 +325,7 @@ public class PdfExporter implements DocumentExporter {
         }
 
         private float textWidth(String text, float fontSize) throws IOException {
-            return font.getStringWidth(text) / 1000f * fontSize;
+            return font.getStringWidth(filterGlyphs(text)) / 1000f * fontSize;
         }
 
         // ---------------------------- 区块 ----------------------------
@@ -311,6 +344,11 @@ public class PdfExporter implements DocumentExporter {
                 int count = Character.charCount(cp);
                 if (unicodeCmap.getGlyphId(cp) != 0) {
                     sb.appendCodePoint(cp);
+                } else if (Character.isWhitespace(cp)) {
+                    sb.append(' ');
+                } else {
+                    // Preserve the identity of characters outside the embedded font's coverage.
+                    sb.append("[U+").append(Integer.toHexString(cp).toUpperCase(java.util.Locale.ROOT)).append(']');
                 }
                 i += count;
             }
@@ -329,11 +367,23 @@ public class PdfExporter implements DocumentExporter {
 
         private void writeSummary(GeneratedDocument doc) throws IOException {
             drawBlockTitle("摘要");
+            if (historical) {
+                drawParagraph("历史报告，仅有章节来源", SMALL_SIZE, MARGIN_LEFT);
+            } else if (doc.comparison() == null && (!doc.summaryClaimIds().isEmpty() || !doc.summaryClaims().isEmpty())) {
+                Set<String> ids = new LinkedHashSet<>(doc.summaryClaimIds());
+                doc.summaryClaims().forEach(claim -> ids.add(claim.claimId()));
+                for (String id : ids) writeClaim(byClaimId.get(id));
+                verticalGap(14f);
+                return;
+            }
             String summary = doc.summary();
             if (summary == null || summary.isBlank()) {
                 drawParagraph("（无摘要）", BODY_SIZE, MARGIN_LEFT);
             } else {
                 drawRichText(summary);
+            }
+            if (doc.comparison() != null) {
+                for (String id : doc.summaryClaimIds()) writeClaim(byClaimId.get(id));
             }
             verticalGap(14f);
         }
@@ -345,7 +395,7 @@ public class PdfExporter implements DocumentExporter {
                 drawParagraph(index + ". " + section.title(), BODY_SIZE, MARGIN_LEFT);
                 index++;
             }
-            drawParagraph(index + ". 参考资料", BODY_SIZE, MARGIN_LEFT);
+            if (options.includeEvidenceAppendix()) drawParagraph(index + ". " + appendixTitle(), BODY_SIZE, MARGIN_LEFT);
             verticalGap(14f);
         }
 
@@ -353,16 +403,158 @@ public class PdfExporter implements DocumentExporter {
             int index = 1;
             for (GeneratedSection section : doc.sections()) {
                 verticalGap(10f);
-                drawLine(index + ". " + section.title(), SECTION_TITLE_SIZE, MARGIN_LEFT);
+                String sectionTitle = index + ". " + section.title();
+                ensureSpace(SECTION_TITLE_SIZE * 1.55f);
+                addBookmark(sectionTitle, page);
+                drawParagraph(sectionTitle, SECTION_TITLE_SIZE, MARGIN_LEFT);
                 verticalGap(4f);
-                if (section.content() == null || section.content().isBlank()) {
+                if (doc.comparison() != null && doc.configuration() != null
+                        && index <= doc.configuration().sections().size()) {
+                    writeComparisonSection(doc.comparison(), doc.configuration().sections().get(index - 1).sectionId());
+                } else if (!historical && !section.claims().isEmpty()) {
+                    for (Claim claim : section.claims()) writeClaim(claim);
+                } else if (section.content() == null || section.content().isBlank()) {
                     drawParagraph("（本章节无内容）", BODY_SIZE, MARGIN_LEFT);
                 } else {
                     drawRichText(section.content());
                 }
-                writeSectionSources(section);
+                if (historical) writeSectionSources(section);
                 index++;
             }
+        }
+
+        private void writeComparisonSection(ComparisonResult comparison, String sectionId) throws IOException {
+            if ("matrix".equals(sectionId)) {
+                Map<String, String> fileNames = new LinkedHashMap<>();
+                comparison.documents().forEach(source -> fileNames.put(source.documentId(), source.fileName()));
+                for (var row : comparison.rows()) {
+                    drawParagraph(row.dimension(), SECTION_TITLE_SIZE, MARGIN_LEFT);
+                    for (var cell : row.cells()) {
+                        String status = switch (cell.status()) {
+                            case FOUND -> "已取证";
+                            case NOT_FOUND -> "本次未找到依据";
+                            case RETRIEVAL_FAILED -> "检索失败";
+                            case EXTRACTION_FAILED -> "提取失败";
+                            case UNVERIFIED -> "无法核验";
+                        };
+                        drawParagraph(fileNames.getOrDefault(cell.documentId(), cell.documentId()) + " · " + status,
+                                BODY_SIZE, MARGIN_LEFT);
+                        if (cell.reason() != null && !cell.reason().isBlank())
+                            drawParagraph(cell.reason(), SMALL_SIZE, MARGIN_LEFT);
+                        for (var fact : cell.facts()) {
+                            if (!fact.verified()) drawParagraph("比较字段未核验", SMALL_SIZE, MARGIN_LEFT);
+                            List<String> values = new ArrayList<>();
+                            addField(values, "对象", fact.object());
+                            addField(values, "期间", fact.period());
+                            addField(values, "条件", fact.condition());
+                            addField(values, "指标", fact.metric());
+                            addField(values, "原值", valueWithUnit(fact.rawValue(), fact.unit()));
+                            addField(values, "换算值", valueWithUnit(fact.normalizedValue(), fact.normalizedUnit()));
+                            if (!values.isEmpty()) drawParagraph(String.join(" · ", values), SMALL_SIZE, MARGIN_LEFT);
+                            writeClaim(byClaimId.get(fact.claimId()));
+                        }
+                    }
+                }
+                return;
+            }
+            boolean found = false;
+            for (var conclusion : comparison.conclusions()) {
+                if (sectionId.equals(ComparisonGenerator.sectionId(conclusion.kind()))) {
+                    found = true;
+                    writeConclusion(conclusion);
+                }
+            }
+            if (!found) drawParagraph("本次未找到可列入本节的比较结论。", BODY_SIZE, MARGIN_LEFT);
+        }
+
+        private void writeConclusion(ComparisonResult.Conclusion conclusion) throws IOException {
+            drawParagraph(conclusion.text(), BODY_SIZE, MARGIN_LEFT);
+            for (String claimId : conclusion.claimIds()) writeClaim(byClaimId.get(claimId));
+        }
+
+        private static String valueWithUnit(String value, String unit) {
+            if (value == null || value.isBlank()) return null;
+            return unit == null || unit.isBlank() ? value : value + " " + unit;
+        }
+
+        private static void addField(List<String> fields, String name, String value) {
+            if (value != null && !value.isBlank()) fields.add(name + "：" + value);
+        }
+
+        private String appendixTitle() {
+            return historical ? "参考资料" : "证据附录";
+        }
+
+        private String location(Evidence evidence) {
+            List<String> parts = new ArrayList<>();
+            parts.add(evidence.fileName() == null ? evidence.documentId() : evidence.fileName());
+            if (evidence.pageStart() != null) {
+                String pages = evidence.pageStart().toString();
+                if (evidence.pageEnd() != null && !evidence.pageEnd().equals(evidence.pageStart()))
+                    pages += "–" + evidence.pageEnd();
+                parts.add("第 " + pages + " 页");
+            }
+            if (evidence.section() != null && !evidence.section().isBlank()) parts.add(evidence.section());
+            if (evidence.nativeLocation() != null && !evidence.nativeLocation().isBlank()
+                    && !evidence.nativeLocation().equals(evidence.section())) parts.add(evidence.nativeLocation());
+            if (parts.size() == 1 && evidence.chunkIndex() != null) parts.add("切片 " + (evidence.chunkIndex() + 1));
+            if (parts.size() == 1) parts.add("位置未记录");
+            return String.join(" · ", parts);
+        }
+
+        private String citation(Evidence evidence) {
+            String number = "[" + numbers.get(evidence.evidenceId()) + "]";
+            String location = location(evidence);
+            return options.citationStyle() == ReportExportOptions.CitationStyle.FILE_LOCATION
+                    ? "[" + location + "] " + number : number + " " + location;
+        }
+
+        private String sourceStatus(Evidence evidence) {
+            if (evidence.sourceStatus() == null) return "来源未核验";
+            return switch (evidence.sourceStatus()) {
+                case MATCHED -> "原文已匹配";
+                case SOURCE_UNAVAILABLE -> "来源不可用";
+                case QUOTE_MISMATCH -> "引文不匹配";
+            };
+        }
+
+        private void writeClaim(Claim claim) throws IOException {
+            if (claim == null) {
+                drawParagraph("证据不足：未找到关联事实", SMALL_SIZE, MARGIN_LEFT);
+                return;
+            }
+            String status = switch (claim.supportStatus()) {
+                case SUPPORTED -> "支持";
+                case PARTIAL -> "部分支持";
+                case CONFLICT -> "与原文冲突";
+                case INSUFFICIENT -> "证据不足";
+                case null -> "证据不足";
+            };
+            List<String> markers = new ArrayList<>();
+            for (String evidenceId : claim.evidenceIds()) {
+                Evidence evidence = byEvidenceId.get(evidenceId);
+                markers.add(evidence == null ? "来源不可用" : citation(evidence) + " " + sourceStatus(evidence));
+            }
+            if (markers.isEmpty()) markers.add("无引用");
+            if (markers.size() == 1) {
+                drawParagraph(claim.text() + "  " + markers.getFirst(), BODY_SIZE, MARGIN_LEFT);
+            } else {
+                drawParagraph(claim.text(), BODY_SIZE, MARGIN_LEFT);
+                for (String marker : markers) drawParagraph(marker, SMALL_SIZE, MARGIN_LEFT);
+            }
+            drawParagraph((claim.automatic() ? "自动判断：" : "支持判断：") + status
+                    + (claim.reason() == null ? "" : " · " + claim.reason()), SMALL_SIZE, MARGIN_LEFT);
+            verticalGap(4f);
+        }
+
+        private void addBookmark(String title, PDPage targetPage) {
+            PDOutlineItem bookmark = new PDOutlineItem();
+            bookmark.setTitle(title);
+            PDPageXYZDestination destination = new PDPageXYZDestination();
+            destination.setPage(targetPage);
+            destination.setTop((int) Math.ceil(y + SECTION_TITLE_SIZE));
+            bookmark.setDestination(destination);
+            outline.addLast(bookmark);
         }
 
         /**
@@ -374,9 +566,9 @@ public class PdfExporter implements DocumentExporter {
             }
             Set<String> names = new LinkedHashSet<>();
             for (Evidence evidence : section.evidences()) {
-                if (evidence.fileName() != null && !evidence.fileName().isBlank()) {
-                    names.add(evidence.fileName());
-                }
+                String name = options.citationStyle() == ReportExportOptions.CitationStyle.FILE_LOCATION
+                        ? location(evidence) : evidence.fileName();
+                if (name != null && !name.isBlank()) names.add(name);
             }
             if (names.isEmpty()) {
                 return;
@@ -388,7 +580,19 @@ public class PdfExporter implements DocumentExporter {
 
         private void writeReferences(GeneratedDocument doc) throws IOException {
             newPage();
-            drawBlockTitle("参考资料");
+            drawBlockTitle(appendixTitle());
+            if (!historical) {
+                if (byEvidenceId.isEmpty()) drawParagraph("没有证据快照", BODY_SIZE, MARGIN_LEFT);
+                for (Evidence evidence : byEvidenceId.values()) {
+                    drawParagraph(citation(evidence) + " · " + sourceStatus(evidence), BODY_SIZE, MARGIN_LEFT);
+                    if (evidence.quote() != null && !evidence.quote().isBlank())
+                        drawParagraph("原文摘录：" + evidence.quote(), BODY_SIZE, MARGIN_LEFT);
+                    if (evidence.attemptedQuote() != null && !evidence.attemptedQuote().isBlank())
+                        drawParagraph("待核引文：" + evidence.attemptedQuote(), SMALL_SIZE, MARGIN_LEFT);
+                    verticalGap(5f);
+                }
+                return;
+            }
             List<Evidence> references = doc.references();
             if (references.isEmpty()) {
                 drawParagraph("（本文档未引用外部资料）", BODY_SIZE, MARGIN_LEFT);

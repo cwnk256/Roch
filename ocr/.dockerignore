@@ -1,0 +1,8 @@
+*
+!Dockerfile
+!requirements.txt
+!adapter.py
+!models.py
+!network_guard.py
+!provision.py
+!server.py

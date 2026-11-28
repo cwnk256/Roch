@@ -174,6 +174,31 @@ class CleaningTextSplitterTest {
     }
 
     @Test
+    void carriesSectionHierarchyAcrossPdfPagesWithoutMixingPageMetadata() {
+        var pages = List.of(
+                new Document("# 设备维护\n这一页说明通用维护要求。", Map.of("page_start", 1, "page_end", 1)),
+                new Document("上一页章节在这里继续。\n## 校准\n这一节说明校准周期。", Map.of("page_start", 2, "page_end", 2)));
+
+        var chunks = splitter.splitPages(pages, "test-pdf");
+        var parent = chunks.stream().filter(chunk -> chunk.getMetadata().get("page_start").equals(1)).findFirst().orElseThrow();
+        var continuation = chunks.stream().filter(chunk -> chunk.getText().contains("上一页章节")).findFirst().orElseThrow();
+        var child = chunks.stream().filter(chunk -> chunk.getText().contains("校准周期")).findFirst().orElseThrow();
+
+        assertEquals("设备维护", continuation.getMetadata().get("section_path"));
+        assertEquals(parent.getMetadata().get("section_id"), continuation.getMetadata().get("section_id"));
+        assertEquals("设备维护 / 校准", child.getMetadata().get("section_path"));
+        assertEquals(2, continuation.getMetadata().get("page_start"));
+        assertEquals(2, child.getMetadata().get("page_end"));
+        for (int index = 0; index < chunks.size(); index++) {
+            assertEquals(index, chunks.get(index).getMetadata().get("chunk_index"));
+            assertEquals(chunks.size(), chunks.get(index).getMetadata().get("chunk_total"));
+        }
+
+        var unrelatedPdf = splitter.splitPages(List.of(new Document("另一份 PDF 的无标题正文。")), "test-pdf");
+        assertEquals("", unrelatedPdf.getFirst().getMetadata().get("section_path"));
+    }
+
+    @Test
     void sameInputProducesSameChunkIds() {
         Map<String, Object> meta = new HashMap<>();
         meta.put("doc_md5", "repeat-md5");

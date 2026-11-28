@@ -28,6 +28,8 @@ public interface DocumentTaskStore {
      */
     void update(DocumentTask task);
 
+    int claimRunning(String taskId);
+
     default PageResult<DocumentTask> list(int page, int size) {
         throw new UnsupportedOperationException("当前任务存储不支持分页查询");
     }

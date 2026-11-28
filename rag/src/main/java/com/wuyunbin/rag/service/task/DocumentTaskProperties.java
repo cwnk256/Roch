@@ -1,5 +1,7 @@
 package com.wuyunbin.rag.service.task;
 
+import com.wuyunbin.rag.dto.ReportRetrievalSettings;
+import com.wuyunbin.rag.retrieval.RetrievalMode;
 import lombok.Getter;
 import lombok.Setter;
 import org.springframework.beans.factory.annotation.Value;
@@ -26,7 +28,25 @@ public class DocumentTaskProperties {
      * 单个章节拼给 LLM 的证据上下文最大字符数（简单上下文控制，非精确 token 估算）。
      */
     @Value("${rag.document-task.max-context-chars:24000}")
-    private int maxContextChars;
+    private int maxContextChars = 24000;
+
+    @Value("${rag.document-task.retrieval.strategy:baseline}")
+    private String retrievalStrategy = ReportRetrievalSettings.BASELINE;
+
+    @Value("${rag.chat.rag.top-k:8}")
+    private int retrievalTopK = 8;
+
+    @Value("${rag.chat.rag.similarity-threshold:0.5}")
+    private double retrievalThreshold = 0.5;
+
+    @Value("${rag.retrieval.mode:vector}")
+    private String baselineRetrievalMode = "vector";
+
+    public ReportRetrievalSettings snapshotRetrieval() {
+        int reportBudget = Math.max(1, maxContextChars);
+        return new ReportRetrievalSettings(retrievalStrategy.strip(), Math.max(1, retrievalTopK),
+                retrievalThreshold, reportBudget, Math.min(8000, reportBudget), RetrievalMode.fromString(baselineRetrievalMode));
+    }
 
     /**
      * 中文字体资源路径。支持 Spring Resource 前缀：

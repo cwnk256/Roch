@@ -14,6 +14,14 @@ public record GeneratedSection(
 
         String content,
 
-        List<Evidence> evidences
+        List<Evidence> evidences,
+        List<Claim> claims
 ) {
+    public GeneratedSection {
+        claims = claims == null ? List.of() : List.copyOf(claims);
+    }
+
+    public GeneratedSection(String title, String content, List<Evidence> evidences) {
+        this(title, content, evidences, List.of());
+    }
 }

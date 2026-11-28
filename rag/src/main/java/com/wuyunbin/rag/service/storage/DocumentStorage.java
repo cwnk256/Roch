@@ -8,6 +8,10 @@ public interface DocumentStorage {
 
     Optional<StoredDocument> load(String documentId) throws IOException;
 
+    default boolean isAvailable(String documentId) throws IOException {
+        return load(documentId).isPresent();
+    }
+
     record StoredDocument(String documentId, String fileName, byte[] content) {
     }
 }

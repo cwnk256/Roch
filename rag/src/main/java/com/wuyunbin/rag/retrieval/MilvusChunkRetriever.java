@@ -2,6 +2,8 @@ package com.wuyunbin.rag.retrieval;
 
 import com.wuyunbin.rag.cleaning.CleaningProperties;
 import com.wuyunbin.rag.cleaning.TextNormalizer;
+import com.wuyunbin.rag.service.ocr.OcrIndexPublication;
+import org.springframework.beans.factory.annotation.Autowired;
 import com.wuyunbin.rag.dto.RetrievalOptions;
 import com.wuyunbin.rag.dto.RetrievedChunk;
 import lombok.RequiredArgsConstructor;
@@ -26,12 +28,17 @@ import java.util.Set;
  */
 @Slf4j
 @Component
-@RequiredArgsConstructor
+@RequiredArgsConstructor(onConstructor_ = @Autowired)
 public class MilvusChunkRetriever implements ChunkRetriever {
 
     private final VectorStore vectorStore;
     private final CleaningProperties cleaningProperties;
     private final TextNormalizer textNormalizer;
+    private final OcrIndexPublication ocrPublication;
+
+    public MilvusChunkRetriever(VectorStore vectorStore, CleaningProperties cleaningProperties, TextNormalizer textNormalizer) {
+        this(vectorStore, cleaningProperties, textNormalizer, null);
+    }
 
     @Override
     public List<RetrievedChunk> search(String query, RetrievalOptions options) {
@@ -54,7 +61,8 @@ public class MilvusChunkRetriever implements ChunkRetriever {
         }
 
         SearchRequest request = requestBuilder.build();
-        List<Document> results = vectorStore.similaritySearch(request);
+        List<Document> results = ocrPublication == null ? vectorStore.similaritySearch(request)
+                : ocrPublication.search(vectorStore, request);
         log.debug("文档检索完成 query={} topK={} threshold={} docFilter={} 命中{}条",
                 normalizedQuery, options.topK(), options.threshold(),
                 options.hasDocumentFilter() ? options.documentIds().size() : 0, results.size());

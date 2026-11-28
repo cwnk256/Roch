@@ -3,6 +3,7 @@ package com.wuyunbin.rag.service.generation;
 import com.wuyunbin.rag.service.generation.model.Evidence;
 import com.wuyunbin.rag.service.generation.model.GeneratedDocument;
 import com.wuyunbin.rag.service.generation.model.GeneratedSection;
+import com.wuyunbin.rag.service.generation.model.VerifiedSummary;
 import org.springframework.stereotype.Component;
 
 import java.util.LinkedHashMap;
@@ -20,6 +21,19 @@ import java.util.Map;
  */
 @Component
 public class GeneratedDocumentAssembler {
+
+    public GeneratedDocument assemble(String title, VerifiedSummary summary, List<GeneratedSection> sections) {
+        GeneratedDocument legacy = assemble(title, summary.text(), sections);
+        Map<String, Evidence> snapshots = new LinkedHashMap<>();
+        for (GeneratedSection section : legacy.sections()) {
+            if (section.evidences() == null) continue;
+            for (Evidence evidence : section.evidences()) {
+                if (evidence != null && evidence.evidenceId() != null) snapshots.putIfAbsent(evidence.evidenceId(), evidence);
+            }
+        }
+        return new GeneratedDocument(title, summary.text(), legacy.sections(), legacy.references(), "v2",
+                summary.claimIds(), summary.additionalClaims(), List.copyOf(snapshots.values()), null, null, Map.of());
+    }
 
     /**
      * @param title    文档标题

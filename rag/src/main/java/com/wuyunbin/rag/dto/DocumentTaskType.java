@@ -19,5 +19,8 @@ public enum DocumentTaskType {
     /**
      * 正式报告：偏章节化、正式文档。
      */
-    REPORT
+    REPORT,
+
+    /** 多份指定文档的逐维度比较。 */
+    COMPARE
 }

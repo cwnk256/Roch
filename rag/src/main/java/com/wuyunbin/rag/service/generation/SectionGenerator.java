@@ -6,6 +6,8 @@ import com.wuyunbin.rag.service.generation.model.GeneratedSection;
 import com.wuyunbin.rag.service.generation.model.ReportSectionPlan;
 
 import java.util.List;
+import java.util.Set;
+import java.util.function.Consumer;
 
 /**
  * 章节生成器：基于单个章节计划与该章节检索到的证据切片写出正文。
@@ -26,4 +28,50 @@ public interface SectionGenerator {
     GeneratedSection generate(DocumentTaskType type,
                               ReportSectionPlan sectionPlan,
                               List<RetrievedChunk> evidenceChunks);
+
+    default GeneratedSection generate(DocumentTaskType type, ReportSectionPlan plan, List<RetrievedChunk> chunks,
+                                      Set<String> allowedDocumentIds) {
+        return generate(type, plan, chunks == null ? List.of() : chunks.stream()
+                .filter(c -> c != null && c.documentId() != null && allowedDocumentIds.contains(c.documentId())).toList());
+    }
+
+    default GeneratedSection generateBatch(DocumentTaskType type, ReportSectionPlan plan, List<RetrievedChunk> chunks,
+                                           Set<String> allowedDocumentIds, String batchId, boolean strict) {
+        return generate(type, plan, chunks, allowedDocumentIds);
+    }
+
+    default GeneratedSection generateAnchoredBatch(DocumentTaskType type, ReportSectionPlan plan,
+                                                  List<RetrievedChunk> chunks, Set<String> allowed, String batchId,
+                                                  int budget, Consumer<List<ClaimVerifier.AnchorSpan>> onAnchors) {
+        onAnchors.accept(List.of());
+        return generateBatch(type, plan, chunks, allowed, batchId, true);
+    }
+
+    default GeneratedSection generateAnchoredBatch(DocumentTaskType type, ReportSectionPlan plan,
+                                                   List<RetrievedChunk> chunks, Set<String> allowed, String batchId,
+                                                   int budget, List<QuestionEvidence> questions,
+                                                   Consumer<List<ClaimVerifier.AnchorSpan>> onAnchors) {
+        return generateAnchoredBatch(type, plan, chunks, allowed, batchId, budget, onAnchors);
+    }
+
+    record QuestionEvidence(int number, String text, List<String> candidateChunkIds) {
+        public QuestionEvidence {
+            candidateChunkIds = List.copyOf(candidateChunkIds);
+        }
+    }
+
+    enum BatchFailureKind { INVALID_RESPONSE, TIMEOUT }
+
+    class BatchFailure extends RuntimeException {
+        private final BatchFailureKind failureKind;
+
+        public BatchFailure(BatchFailureKind failureKind, Throwable cause) {
+            super(failureKind.name(), cause);
+            this.failureKind = failureKind;
+        }
+
+        public BatchFailureKind failureKind() {
+            return failureKind;
+        }
+    }
 }

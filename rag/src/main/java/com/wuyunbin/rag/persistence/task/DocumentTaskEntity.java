@@ -27,6 +27,8 @@ public class DocumentTaskEntity {
     private DocumentTaskType type;
     @Column(nullable = false, columnDefinition = "TEXT")
     private String instruction;
+    @Column(name = "configuration_json", columnDefinition = "TEXT")
+    private String configurationJson;
     private String title;
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 20)

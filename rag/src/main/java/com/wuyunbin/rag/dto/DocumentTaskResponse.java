@@ -5,7 +5,7 @@ import io.swagger.v3.oas.annotations.media.Schema;
 /**
  * 文档任务响应：任务状态 + 结果文件下载信息。
  *
- * <p>同步执行模式下，POST 创建接口在任务终态（COMPLETED / FAILED）后返回本对象。</p>
+ * <p>创建、查询、重试与进度推送共用此快照。</p>
  */
 @Schema(description = "文档任务响应")
 public record DocumentTaskResponse(
@@ -29,7 +29,18 @@ public record DocumentTaskResponse(
         String downloadUrl,
 
         @Schema(description = "失败原因（FAILED 时存在）")
-        String errorMessage
+        String errorMessage,
+
+        @Schema(description = "已完成进度（0–100），失败时保留最后进度")
+        int progress,
+
+        @Schema(description = "当前处理步骤")
+        String currentStep,
+
+        @Schema(description = "机器可读的失败原因")
+        String errorCode,
+
+        ReportConfiguration configuration
 ) {
 
     /**
@@ -46,7 +57,7 @@ public record DocumentTaskResponse(
                 task.getTitle(),
                 task.getResultFileName(),
                 downloadUrl,
-                task.getErrorMessage()
+                task.getErrorMessage(), task.getProgress(), task.getCurrentStep(), task.getErrorCode(), task.getConfiguration()
         );
     }
 }

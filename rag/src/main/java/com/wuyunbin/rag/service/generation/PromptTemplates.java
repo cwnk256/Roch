@@ -8,6 +8,9 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
+import java.util.Objects;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Prompt 模板加载与简单占位符渲染。
@@ -18,6 +21,7 @@ import java.util.Map;
 @Component
 public class PromptTemplates {
 
+    private static final Pattern PLACEHOLDER = Pattern.compile("\\{([A-Za-z][A-Za-z0-9_]*)}");
     private final ResourceLoader resourceLoader;
 
     public PromptTemplates(ResourceLoader resourceLoader) {
@@ -28,12 +32,9 @@ public class PromptTemplates {
      * 将模板中的 {key} 替换为 values 中对应值；null 值替换为空串。
      */
     public static String render(String template, Map<String, String> values) {
-        String result = template;
-        for (Map.Entry<String, String> entry : values.entrySet()) {
-            String value = entry.getValue() == null ? "" : entry.getValue();
-            result = result.replace("{" + entry.getKey() + "}", value);
-        }
-        return result;
+        // Replace only placeholders in the template. Source quotes may themselves contain literal placeholders.
+        return PLACEHOLDER.matcher(template).replaceAll(match -> Matcher.quoteReplacement(values.containsKey(match.group(1))
+                ? Objects.toString(values.get(match.group(1)), "") : match.group()));
     }
 
     /**

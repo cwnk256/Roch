@@ -1,6 +1,6 @@
 <script lang="ts" setup>
 import {ref} from 'vue';
-import {ChevronDown, Database, Download, Globe, Loader2} from 'lucide-vue-next';
+import {ChevronRight, Database, Download, Globe, Loader2} from 'lucide-vue-next';
 import {api} from '../api';
 import type {PageResponse} from '../types';
 
@@ -12,19 +12,14 @@ interface ImportResult {
 }
 
 const url = ref(''), loading = ref(false), error = ref(''), result = ref<PageResponse | null>(null),
-    previewCollapsed = ref(false), importing = ref(false), importError = ref(''),
+    importing = ref(false), importError = ref(''),
     importResult = ref<ImportResult | null>(null);
 const engine = ref<'auto' | 'jsoup' | 'firecrawl'>('auto');
-const togglePreview = () => {
-  previewCollapsed.value = !previewCollapsed.value
-};
-
 async function fetchPage() {
-  if (!url.value.trim()) return;
+  if (loading.value || importing.value || !url.value.trim()) return;
   loading.value = true;
   error.value = '';
   result.value = null;
-  previewCollapsed.value = false;
   importResult.value = null;
   importError.value = '';
   try {
@@ -49,7 +44,7 @@ function download() {
 }
 
 async function importToKB() {
-  if (!result.value) return;
+  if (!result.value || importing.value) return;
   importing.value = true;
   importError.value = '';
   importResult.value = null;
@@ -64,105 +59,89 @@ async function importToKB() {
 }
 </script>
 <template>
-  <section class="page-intro">
-    <div>
-      <p class="eyebrow">INGESTION / WEB</p>
-      <h2>获取外部网页</h2>
-      <p>输入网页 URL，抓取正文转为 Markdown，支持本地直连与 Firecrawl 云端增强抓取，可直接导入知识库或下载为 TXT。</p>
-    </div>
-  </section>
+  <div class="page-intro"><p>将网页正文转为 Markdown，可下载为 TXT 或导入知识库。</p></div>
 
-  <div class="panel" style="padding:24px;max-width:860px">
-    <div class="field">
-      <label>网页 URL</label>
-      <div style="display:flex;gap:10px">
-        <input v-model="url" type="url" placeholder="https://example.com/article" @keyup.enter="fetchPage"/>
-        <select v-model="engine" aria-label="抓取引擎" style="flex:none;width:150px">
-          <option value="auto">自动（推荐）</option>
-          <option value="jsoup">普通抓取</option>
-          <option value="firecrawl">增强抓取</option>
-        </select>
-        <button :disabled="loading||!url.trim()" class="button primary" @click="fetchPage">
-          <Loader2 v-if="loading" :size="15" class="spin"/>
-          <Globe v-else :size="15"/>
-          {{ loading ? '抓取中…' : '抓取网页' }}
-        </button>
+  <div class="flow narrow-panel">
+    <form class="panel panel-pad" @submit.prevent="fetchPage">
+      <div class="fetch-fields">
+        <div class="field">
+          <label for="webpage-url">网页 URL</label>
+          <input id="webpage-url" v-model="url" type="url" placeholder="https://example.com/article"/>
+        </div>
+        <div class="field">
+          <label for="webpage-engine">抓取引擎</label>
+          <select id="webpage-engine" v-model="engine">
+            <option value="auto">自动（推荐）</option>
+            <option value="jsoup">普通抓取</option>
+            <option value="firecrawl">增强抓取</option>
+          </select>
+        </div>
+        <div class="form-action">
+          <button :disabled="loading || importing || !url.trim()" class="button primary" type="submit">
+            <Loader2 v-if="loading" :size="15" class="spin" aria-hidden="true"/>
+            <Globe v-else :size="15" aria-hidden="true"/>
+            {{ loading ? '抓取中…' : '抓取网页' }}
+          </button>
+        </div>
       </div>
-      <p class="muted" style="font-size:12px;line-height:1.6;margin:8px 2px 0">
-        <strong>普通抓取</strong>：本地直连静态 HTML，自动识别 UTF-8 / GBK 编码，零成本；
-        <strong>增强抓取</strong>：Firecrawl 云端渲染，支持 JS 动态页面与反爬站点（按页计费，需在后端配置 API Key）；
-        <strong>自动</strong>：先普通抓取，正文为空或失败时自动回退增强抓取。
-      </p>
-    </div>
+      <p class="muted fetch-help">普通抓取直接读取静态网页。增强抓取用 Firecrawl 处理动态网页，按页计费，需在后端配置 API Key。自动模式会在普通抓取失败或正文为空时改用增强抓取。</p>
+    </form>
 
-    <div v-if="error" class="notice error" style="margin-top:16px">{{ error }}</div>
+    <div v-if="error" class="notice error" role="alert">{{ error }}</div>
 
-    <div v-if="result" style="margin-top:20px">
-      <div class="section-heading">
+    <section v-if="result" class="panel panel-pad flow webpage-result" aria-labelledby="webpage-result-title">
+      <header class="section-heading">
         <div>
-          <h3>{{ result.title || '无标题' }}</h3>
+          <h2 id="webpage-result-title">{{ result.title || '无标题' }}</h2>
           <p class="muted">{{ result.url }}</p>
         </div>
         <div class="actions">
-          <button class="button" @click="download">
-            <Download :size="15"/>
-            下载 TXT
-          </button>
-          <button :disabled="importing" class="button primary" @click="importToKB">
-            <Loader2 v-if="importing" :size="15" class="spin"/>
-            <Database v-else :size="15"/>
+          <button class="button" type="button" @click="download"><Download :size="15" aria-hidden="true"/>下载 TXT</button>
+          <button :disabled="importing" class="button primary" type="button" @click="importToKB">
+            <Loader2 v-if="importing" :size="15" class="spin" aria-hidden="true"/>
+            <Database v-else :size="15" aria-hidden="true"/>
             {{ importing ? '导入中…' : '导入知识库' }}
           </button>
         </div>
+      </header>
+
+      <dl class="fetch-meta">
+        <div><dt>文件</dt><dd>{{ result.fileName }}</dd></div>
+        <div><dt>字符数</dt><dd>{{ result.length }}</dd></div>
+        <div><dt>抓取时间</dt><dd>{{ result.fetchedAt }}</dd></div>
+      </dl>
+
+      <div v-if="importError" class="notice error" role="alert"><strong>导入失败</strong> {{ importError }}</div>
+      <div v-if="importResult" class="notice" role="status">
+        <strong>{{ importResult.duplicated ? '文件已在知识库中' : '导入成功' }}</strong>
+        <p>{{ importResult.chunkCount }} 个切片 · MD5 {{ importResult.md5 }}</p>
+        <p v-if="importResult.message">{{ importResult.message }}</p>
       </div>
 
-      <div style="display:flex;gap:18px;flex-wrap:wrap;font-size:13px;color:#71837c;margin-bottom:6px">
-        <span>文件：<strong class="muted" style="color:#3d554d">{{ result.fileName }}</strong></span>
-        <span>字符数：{{ result.length }}</span>
-        <span>抓取时间：{{ result.fetchedAt }}</span>
-      </div>
-
-      <div v-if="importError" class="notice error" style="margin-top:12px">
-        <strong>导入失败：</strong>{{ importError }}
-      </div>
-      <div v-if="importResult" class="notice" style="margin-top:12px">
-        <strong>导入成功</strong>
-        <span v-if="importResult.duplicated">（文件已存在，跳过重复导入）</span>
-        <span style="margin-left:10px">切片数：{{ importResult.chunkCount }} · MD5：{{ importResult.md5 }}</span>
-        <div v-if="importResult.message" style="margin-top:4px">{{ importResult.message }}</div>
-      </div>
-
-      <div class="section-heading collapsible-heading" @click="togglePreview">
-        <span class="heading-group"><h3>Markdown 预览</h3>
-          <ChevronDown :size="16" :class="['chevron', {collapsed: previewCollapsed}]"/>
-        </span>
-      </div>
-      <pre v-show="!previewCollapsed" class="code-view" style="max-height:520px">{{ result.markdown }}</pre>
-    </div>
+      <details class="webpage-preview" open>
+        <summary><ChevronRight :size="16" class="disclosure-chevron" aria-hidden="true"/>Markdown 预览</summary>
+        <pre class="code-view" tabindex="0" aria-label="Markdown 内容">{{ result.markdown }}</pre>
+      </details>
+    </section>
   </div>
 </template>
 
 <style scoped>
-.collapsible-heading {
-  cursor: pointer;
-  user-select: none;
-}
-.heading-group {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-}
-.collapsible-heading .chevron {
-  transition: transform .15s ease;
-}
-.collapsible-heading .chevron.collapsed {
-  transform: rotate(-90deg);
-}
-.spin {
-  animation: spin 1s linear infinite;
-}
-@keyframes spin {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
+.fetch-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(128px, auto) auto; gap: var(--space-3) }
+.fetch-fields .button { min-height: 40px }
+.fetch-help { font-size: var(--font-small); line-height: 1.65; margin: var(--space-3) 0 0 }
+.webpage-result .section-heading { margin: 0 }
+.webpage-result .section-heading > div:first-child { min-width: 0 }
+.webpage-result p { margin: var(--space-1) 0 0; font-size: var(--font-small) }
+.fetch-meta { display: flex; flex-wrap: wrap; gap: var(--space-3) var(--space-5); margin: 0; padding-block: var(--space-3); border-block: 1px solid var(--line) }
+.fetch-meta div { min-width: 0 }
+.fetch-meta dt { color: var(--secondary); font-size: .75rem }
+.fetch-meta dd { margin: var(--space-1) 0 0; overflow-wrap: anywhere; font-size: var(--font-small) }
+.webpage-preview summary { display: flex; align-items: center; gap: var(--space-2); padding-block: var(--space-2); font-weight: 600 }
+.webpage-preview summary::-webkit-details-marker { display: none }
+.webpage-preview .code-view { max-height: 520px }
+@media (max-width: 600px) {
+  .fetch-fields { grid-template-columns: minmax(0, 1fr) auto }
+  .fetch-fields > .field:first-child { grid-column: 1 / -1 }
 }
 </style>

@@ -3,7 +3,15 @@ package com.wuyunbin.rag.controller;
 import com.wuyunbin.rag.dto.*;
 import com.wuyunbin.rag.service.task.DocumentTaskExecutionException;
 import com.wuyunbin.rag.service.task.DocumentTaskService;
+import com.wuyunbin.rag.service.task.TaskProgressPublisher;
+import com.wuyunbin.rag.service.task.ReportTemplates;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.server.ResponseStatusException;
 import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.media.Content;
+import io.swagger.v3.oas.annotations.media.Schema;
+import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import org.springframework.core.io.FileSystemResource;
@@ -26,15 +34,24 @@ import java.util.Optional;
 @RestController
 @RequestMapping("/api/document-tasks")
 @RequiredArgsConstructor
-@Tag(name = "文档任务接口", description = "基于指定资料的智能文档生成（SUMMARY / REPORT）与 PDF 下载")
+@Tag(name = "文档任务接口", description = "基于指定资料的智能文档生成（SUMMARY / REPORT / COMPARE）与 PDF 下载")
 public class DocumentTaskController {
 
     private final DocumentTaskService documentTaskService;
+    private final TaskProgressPublisher progressPublisher;
+
+    @GetMapping("/templates")
+    @Operation(summary = "读取内置文档模板")
+    public java.util.List<ReportTemplates.Template> templates() {
+        return ReportTemplates.list();
+    }
 
     @PostMapping
     @Operation(summary = "创建并执行文档任务",
-            description = "传入 type（SUMMARY/REPORT）、至少 1 个 documentId 与自然语言 instruction；"
-                    + "同步执行并在完成后返回任务状态与下载地址")
+            description = "传入 type、documentIds 与自然语言 instruction；COMPARE 至少需要两份不同文档。"
+                    + "异步执行，立即返回 PENDING 快照")
+    @ApiResponse(responseCode = "200", description = "新任务的初始快照",
+            content = @Content(mediaType = "application/json", schema = @Schema(implementation = DocumentTaskResponse.class)))
     public ResponseEntity<?> createTask(@RequestBody DocumentTaskRequest request) {
         try {
             return ResponseEntity.ok(documentTaskService.createAndExecute(request));
@@ -51,12 +68,22 @@ public class DocumentTaskController {
 
     @GetMapping("/{taskId}")
     @Operation(summary = "查询任务状态", description = "按 taskId 查询任务状态；不存在返回 404")
+    @ApiResponse(responseCode = "200", description = "当前任务快照",
+            content = @Content(mediaType = "application/json", schema = @Schema(implementation = DocumentTaskResponse.class)))
     public ResponseEntity<?> getTask(@PathVariable String taskId) {
         Optional<DocumentTask> found = documentTaskService.find(taskId);
         if (found.isEmpty()) {
             return ResponseEntity.status(404).body(Map.of("error", "任务不存在: " + taskId));
         }
         return ResponseEntity.ok(DocumentTaskResponse.from(found.get()));
+    }
+
+    @GetMapping(value = "/{taskId}/events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    @Operation(summary = "订阅任务进度", description = "progress 事件返回任务快照；首次连接立即推送，终态后关闭")
+    public SseEmitter taskEvents(@PathVariable String taskId) {
+        return progressPublisher.open(taskId, () -> documentTaskService.find(taskId)
+                .map(DocumentTaskResponse::from)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "任务不存在")));
     }
 
     @GetMapping
@@ -104,6 +131,8 @@ public class DocumentTaskController {
 
     @PostMapping("/{taskId}/retry")
     @Operation(summary = "重试失败任务", description = "创建一个新的任务，不覆盖原任务及其资产")
+    @ApiResponse(responseCode = "202", description = "重试产生的新任务快照",
+            content = @Content(mediaType = "application/json", schema = @Schema(implementation = DocumentTaskResponse.class)))
     public ResponseEntity<?> retry(@PathVariable String taskId) {
         try {
             return ResponseEntity.accepted().body(documentTaskService.retry(taskId));
@@ -116,9 +145,9 @@ public class DocumentTaskController {
 
     @PostMapping("/{taskId}/artifacts/pdf")
     @Operation(summary = "再次导出 PDF", description = "从已保存的 result.json 重建 PDF，不调用 LLM")
-    public ResponseEntity<?> reExportPdf(@PathVariable String taskId) {
+    public ResponseEntity<?> reExportPdf(@PathVariable String taskId, @RequestBody(required = false) ReportExportOptions options) {
         try {
-            return ResponseEntity.ok(documentTaskService.reExportPdf(taskId));
+            return ResponseEntity.ok(documentTaskService.reExportPdf(taskId, options));
         } catch (IllegalArgumentException e) {
             return ResponseEntity.status(404).body(Map.of("error", e.getMessage()));
         } catch (IllegalStateException e) {
