@@ -136,7 +136,7 @@ onMounted(load)
       <EmptyState v-else message="Import a document first" title="No documents"/>
       <PaginationControl :page="page" :size="pageSize" :total="total" @change="load"/>
     </div>
-    <div class="panel" style="padding:18px">
+    <div class="panel" style="padding:18px;max-height:975.33px;overflow-y:auto">
       <template v-if="selected"><h3 style="margin-top:0">{{ selected.fileName }}</h3>
         <p class="muted" style="font-size:12px">{{ selected.documentId }}</p>
         <div class="section-heading"><h3>Chunk preview</h3><span>{{ chunkTotal }} items</span></div>
